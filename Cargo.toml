@@ -1,0 +1,11 @@
+[package]
+name = "meta_git_lib"
+version = "0.1.0"
+edition = "2021"
+description = "Reusable git operations for meta plugins"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+indicatif = "0.17"
+console = "0.15"
