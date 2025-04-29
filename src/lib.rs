@@ -2,6 +2,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+pub mod missing;
+pub use missing::print_missing_repo;
 use console::style;
 
 /// Clone a git repository into the target directory, with progress bar.
