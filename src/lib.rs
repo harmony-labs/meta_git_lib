@@ -1,9 +1,16 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
 use anyhow::Result;
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressBar;
 pub mod missing;
+pub mod ssh_multiplexing;
 pub use missing::print_missing_repo;
+pub use ssh_multiplexing::{
+    is_ssh_rate_limit_error,
+    is_multiplexing_configured,
+    prompt_and_setup_multiplexing,
+    print_multiplexing_hint,
+};
 use console::style;
 
 /// Clone a git repository into the target directory, with progress bar.
