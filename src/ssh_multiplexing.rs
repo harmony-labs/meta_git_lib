@@ -157,10 +157,60 @@ mod tests {
 
     #[test]
     fn test_is_ssh_rate_limit_error() {
+        // Test all known SSH error patterns
         assert!(is_ssh_rate_limit_error("Connection closed by 140.82.113.4 port 22"));
         assert!(is_ssh_rate_limit_error("ssh: connect to host github.com port 22: Operation timed out"));
         assert!(is_ssh_rate_limit_error("ssh_dispatch_run_fatal: Connection to 140.82.114.3 port 22"));
+        assert!(is_ssh_rate_limit_error("Connection reset by peer"));
+        assert!(is_ssh_rate_limit_error("Connection refused"));
+
+        // Test non-matching cases
         assert!(!is_ssh_rate_limit_error("Already up to date."));
         assert!(!is_ssh_rate_limit_error("fatal: not a git repository"));
+        assert!(!is_ssh_rate_limit_error("error: pathspec 'foo' did not match any file(s)"));
+        assert!(!is_ssh_rate_limit_error(""));
+    }
+
+    #[test]
+    fn test_ssh_config_path() {
+        // ssh_config_path should return Some path when HOME is set
+        let path = ssh_config_path();
+        // This test just verifies the function doesn't panic
+        // The actual path depends on the HOME environment variable
+        if std::env::var("HOME").is_ok() {
+            assert!(path.is_some());
+            let path = path.unwrap();
+            assert!(path.ends_with("config"));
+            assert!(path.to_str().unwrap().contains(".ssh"));
+        }
+    }
+
+    #[test]
+    fn test_ssh_sockets_dir() {
+        // ssh_sockets_dir should return Some path when HOME is set
+        let path = ssh_sockets_dir();
+        if std::env::var("HOME").is_ok() {
+            assert!(path.is_some());
+            let path = path.unwrap();
+            assert!(path.ends_with("sockets"));
+            assert!(path.to_str().unwrap().contains(".ssh"));
+        }
+    }
+
+    #[test]
+    fn test_multiplexing_config_block() {
+        let block = multiplexing_config_block();
+        assert!(block.contains("Host github.com"));
+        assert!(block.contains("ControlMaster auto"));
+        assert!(block.contains("ControlPath"));
+        assert!(block.contains("ControlPersist"));
+    }
+
+    #[test]
+    fn test_is_ssh_rate_limit_error_case_sensitivity() {
+        // Should match exact case
+        assert!(is_ssh_rate_limit_error("Connection closed by"));
+        // Should not match different case (patterns are case-sensitive)
+        assert!(!is_ssh_rate_limit_error("connection closed by"));
     }
 }
