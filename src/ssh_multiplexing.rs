@@ -4,10 +4,10 @@
 //! SSH connections to the same host can be rate-limited. SSH multiplexing
 //! allows multiple sessions to share a single TCP connection, avoiding this issue.
 
+use console::style;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use console::style;
 
 /// Patterns that indicate SSH rate-limiting or connection issues
 const SSH_ERROR_PATTERNS: &[&str] = &[
@@ -20,7 +20,9 @@ const SSH_ERROR_PATTERNS: &[&str] = &[
 
 /// Check if an error message indicates SSH rate-limiting
 pub fn is_ssh_rate_limit_error(error_output: &str) -> bool {
-    SSH_ERROR_PATTERNS.iter().any(|pattern| error_output.contains(pattern))
+    SSH_ERROR_PATTERNS
+        .iter()
+        .any(|pattern| error_output.contains(pattern))
 }
 
 /// Get the path to the SSH config file
@@ -56,7 +58,8 @@ Host github.com
     ControlMaster auto
     ControlPath ~/.ssh/sockets/%r@%h-%p
     ControlPersist 600
-"#.to_string()
+"#
+    .to_string()
 }
 
 /// Prompt user and set up SSH multiplexing
@@ -69,7 +72,10 @@ pub fn prompt_and_setup_multiplexing() -> io::Result<bool> {
     println!("SSH multiplexing allows parallel git operations to share a single connection,");
     println!("which avoids rate limiting and speeds up operations.");
     println!();
-    println!("This will add the following to {}:", style("~/.ssh/config").yellow());
+    println!(
+        "This will add the following to {}:",
+        style("~/.ssh/config").yellow()
+    );
     println!("{}", style(multiplexing_config_block()).dim());
 
     print!("Would you like to set this up now? [y/N]: ");
@@ -91,7 +97,10 @@ pub fn prompt_and_setup_multiplexing() -> io::Result<bool> {
 pub fn setup_multiplexing() -> io::Result<()> {
     // Create sockets directory
     let Some(sockets_dir) = ssh_sockets_dir() else {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "Could not determine home directory"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not determine home directory",
+        ));
     };
 
     if !sockets_dir.exists() {
@@ -101,7 +110,10 @@ pub fn setup_multiplexing() -> io::Result<()> {
 
     // Update SSH config
     let Some(config_path) = ssh_config_path() else {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "Could not determine home directory"));
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Could not determine home directory",
+        ));
     };
 
     // Read existing config or start fresh
@@ -109,7 +121,10 @@ pub fn setup_multiplexing() -> io::Result<()> {
 
     // Check if github.com host block already exists
     if existing_config.contains("Host github.com") {
-        println!("{} Found existing 'Host github.com' in SSH config.", style("!").yellow());
+        println!(
+            "{} Found existing 'Host github.com' in SSH config.",
+            style("!").yellow()
+        );
         println!("  Please manually add ControlMaster settings to your existing config.");
         println!("  Add these lines under your 'Host github.com' block:");
         println!("{}", style("    ControlMaster auto").dim());
@@ -129,14 +144,21 @@ pub fn setup_multiplexing() -> io::Result<()> {
     let new_config = if existing_config.is_empty() {
         multiplexing_config_block()
     } else {
-        format!("{}\n{}", existing_config.trim_end(), multiplexing_config_block())
+        format!(
+            "{}\n{}",
+            existing_config.trim_end(),
+            multiplexing_config_block()
+        )
     };
 
     fs::write(&config_path, new_config)?;
     println!("{} Updated {}", style("✓").green(), config_path.display());
 
     println!();
-    println!("{} SSH multiplexing is now configured!", style("✓").green().bold());
+    println!(
+        "{} SSH multiplexing is now configured!",
+        style("✓").green().bold()
+    );
     println!("  Parallel git operations will now share a single SSH connection.");
 
     Ok(())
@@ -147,7 +169,10 @@ pub fn print_multiplexing_hint() {
     println!();
     println!("{}", style("Hint:").yellow().bold());
     println!("  Some SSH connections failed, possibly due to rate limiting.");
-    println!("  Run {} to set up SSH multiplexing,", style("meta git setup-ssh").cyan());
+    println!(
+        "  Run {} to set up SSH multiplexing,",
+        style("meta git setup-ssh").cyan()
+    );
     println!("  which allows parallel operations to share a single connection.");
 }
 
@@ -158,16 +183,24 @@ mod tests {
     #[test]
     fn test_is_ssh_rate_limit_error() {
         // Test all known SSH error patterns
-        assert!(is_ssh_rate_limit_error("Connection closed by 140.82.113.4 port 22"));
-        assert!(is_ssh_rate_limit_error("ssh: connect to host github.com port 22: Operation timed out"));
-        assert!(is_ssh_rate_limit_error("ssh_dispatch_run_fatal: Connection to 140.82.114.3 port 22"));
+        assert!(is_ssh_rate_limit_error(
+            "Connection closed by 140.82.113.4 port 22"
+        ));
+        assert!(is_ssh_rate_limit_error(
+            "ssh: connect to host github.com port 22: Operation timed out"
+        ));
+        assert!(is_ssh_rate_limit_error(
+            "ssh_dispatch_run_fatal: Connection to 140.82.114.3 port 22"
+        ));
         assert!(is_ssh_rate_limit_error("Connection reset by peer"));
         assert!(is_ssh_rate_limit_error("Connection refused"));
 
         // Test non-matching cases
         assert!(!is_ssh_rate_limit_error("Already up to date."));
         assert!(!is_ssh_rate_limit_error("fatal: not a git repository"));
-        assert!(!is_ssh_rate_limit_error("error: pathspec 'foo' did not match any file(s)"));
+        assert!(!is_ssh_rate_limit_error(
+            "error: pathspec 'foo' did not match any file(s)"
+        ));
         assert!(!is_ssh_rate_limit_error(""));
     }
 
