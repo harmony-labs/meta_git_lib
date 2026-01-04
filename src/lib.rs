@@ -3,6 +3,7 @@ use indicatif::ProgressBar;
 use std::path::Path;
 use std::process::{Command, Stdio};
 pub mod missing;
+pub mod snapshot;
 pub mod ssh_multiplexing;
 use console::style;
 pub use missing::print_missing_repo;
