@@ -25,6 +25,37 @@ pub fn is_ssh_rate_limit_error(error_output: &str) -> bool {
         .any(|pattern| error_output.contains(pattern))
 }
 
+/// Extract the SSH hostname from a git remote URL.
+///
+/// Supports:
+/// - SCP-like syntax: `git@HOST:path`
+/// - SSH URL: `ssh://HOST/path` or `ssh://user@HOST/path`
+///
+/// Returns `None` for non-SSH URLs (https://, file://, etc.)
+pub fn extract_ssh_host(url: &str) -> Option<String> {
+    if let Some(rest) = url.strip_prefix("ssh://") {
+        // ssh://[user@]host[:port]/path
+        let host_part = rest.split('/').next()?;
+        // Strip optional port
+        let host_no_port = host_part.split(':').next()?;
+        let host = host_no_port.split('@').last()?;
+        if host.is_empty() {
+            return None;
+        }
+        Some(host.to_string())
+    } else if url.contains('@') && url.contains(':') && !url.contains("://") {
+        // git@host:path (SCP-like syntax)
+        let after_at = url.split('@').nth(1)?;
+        let host = after_at.split(':').next()?;
+        if host.is_empty() {
+            return None;
+        }
+        Some(host.to_string())
+    } else {
+        None
+    }
+}
+
 /// Get the path to the SSH config file
 fn ssh_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("config"))
@@ -35,8 +66,11 @@ fn ssh_sockets_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("sockets"))
 }
 
-/// Check if SSH multiplexing is configured for github.com
-pub fn is_multiplexing_configured() -> bool {
+/// Check if SSH multiplexing is configured for all given hosts.
+///
+/// A host is considered configured if the SSH config contains a `Host <host>` block
+/// with `ControlMaster`, or if a `Host *` wildcard block has `ControlMaster`.
+pub fn is_multiplexing_configured(hosts: &[&str]) -> bool {
     let Some(config_path) = ssh_config_path() else {
         return false;
     };
@@ -45,38 +79,108 @@ pub fn is_multiplexing_configured() -> bool {
         return false;
     };
 
-    // Simple check: look for ControlMaster in the config
-    // A more thorough check would parse the SSH config format
-    content.contains("ControlMaster") && content.contains("ControlPath")
+    hosts.iter().all(|host| is_host_configured(&content, host))
 }
 
-/// The configuration block to add for SSH multiplexing
-fn multiplexing_config_block() -> String {
-    r#"
-# SSH multiplexing for faster parallel git operations
-Host github.com
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-    ControlPersist 600
-"#
-    .to_string()
+/// Check if a specific host has SSH multiplexing configured.
+///
+/// Parses SSH config line-by-line, tracking Host blocks. A host is configured if:
+/// - It has a dedicated `Host <host>` block containing `ControlMaster`, or
+/// - A `Host *` wildcard block contains `ControlMaster`
+fn is_host_configured(content: &str, host: &str) -> bool {
+    let mut in_matching_block = false;
+    let mut wildcard_has_control_master = false;
+    let mut in_wildcard_block = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // New Host/Match block starts — reset tracking
+        if trimmed.starts_with("Host ") || trimmed.starts_with("Match ") {
+            in_matching_block = false;
+            in_wildcard_block = false;
+
+            if trimmed.starts_with("Host ") {
+                let hosts_on_line = &trimmed["Host ".len()..];
+                // Host lines can have multiple patterns: "Host github.com gitlab.com"
+                for pattern in hosts_on_line.split_whitespace() {
+                    if pattern == host {
+                        in_matching_block = true;
+                    }
+                    if pattern == "*" {
+                        in_wildcard_block = true;
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Check for ControlMaster within a matching block
+        if trimmed.starts_with("ControlMaster") {
+            if in_matching_block {
+                return true;
+            }
+            if in_wildcard_block {
+                wildcard_has_control_master = true;
+            }
+        }
+    }
+
+    wildcard_has_control_master
 }
 
-/// Prompt user and set up SSH multiplexing
-/// Returns Ok(true) if setup was completed, Ok(false) if user declined
-pub fn prompt_and_setup_multiplexing() -> io::Result<bool> {
+/// The configuration block to add for SSH multiplexing for a given host.
+fn multiplexing_config_block(host: &str) -> String {
+    format!(
+        "\n# SSH multiplexing for faster parallel git operations\n\
+         Host {host}\n    \
+         ControlMaster auto\n    \
+         ControlPath ~/.ssh/sockets/%r@%h-%p\n    \
+         ControlPersist 600\n"
+    )
+}
+
+/// Prompt user and set up SSH multiplexing for the given hosts.
+/// Returns Ok(true) if setup was completed, Ok(false) if user declined.
+pub fn prompt_and_setup_multiplexing(hosts: &[&str]) -> io::Result<bool> {
+    // Filter to only unconfigured hosts
+    let config_content = ssh_config_path()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .unwrap_or_default();
+    let unconfigured: Vec<&str> = hosts
+        .iter()
+        .filter(|h| !is_host_configured(&config_content, h))
+        .copied()
+        .collect();
+
+    if unconfigured.is_empty() {
+        return Ok(true);
+    }
+
     println!();
     println!("{}", style("SSH Multiplexing Setup").bold().cyan());
     println!();
-    println!("Multiple SSH connections to GitHub are being rate-limited.");
-    println!("SSH multiplexing allows parallel git operations to share a single connection,");
-    println!("which avoids rate limiting and speeds up operations.");
+    println!("Multiple SSH connections can be rate-limited when running parallel git operations.");
+    println!("SSH multiplexing allows parallel operations to share a single connection per host.");
+    println!();
+
+    let host_display = if unconfigured.len() == 1 {
+        unconfigured[0].to_string()
+    } else {
+        unconfigured.join(", ")
+    };
+    println!(
+        "Hosts to configure: {}",
+        style(&host_display).yellow()
+    );
     println!();
     println!(
         "This will add the following to {}:",
         style("~/.ssh/config").yellow()
     );
-    println!("{}", style(multiplexing_config_block()).dim());
+    for host in &unconfigured {
+        print!("{}", style(multiplexing_config_block(host)).dim());
+    }
 
     print!("Would you like to set this up now? [y/N]: ");
     io::stdout().flush()?;
@@ -89,12 +193,12 @@ pub fn prompt_and_setup_multiplexing() -> io::Result<bool> {
         return Ok(false);
     }
 
-    setup_multiplexing()?;
+    setup_multiplexing(&unconfigured)?;
     Ok(true)
 }
 
-/// Set up SSH multiplexing (creates sockets dir and updates config)
-pub fn setup_multiplexing() -> io::Result<()> {
+/// Set up SSH multiplexing for the given hosts (creates sockets dir and updates config).
+pub fn setup_multiplexing(hosts: &[&str]) -> io::Result<()> {
     // Create sockets directory
     let Some(sockets_dir) = ssh_sockets_dir() else {
         return Err(io::Error::new(
@@ -116,23 +220,6 @@ pub fn setup_multiplexing() -> io::Result<()> {
         ));
     };
 
-    // Read existing config or start fresh
-    let existing_config = fs::read_to_string(&config_path).unwrap_or_default();
-
-    // Check if github.com host block already exists
-    if existing_config.contains("Host github.com") {
-        println!(
-            "{} Found existing 'Host github.com' in SSH config.",
-            style("!").yellow()
-        );
-        println!("  Please manually add ControlMaster settings to your existing config.");
-        println!("  Add these lines under your 'Host github.com' block:");
-        println!("{}", style("    ControlMaster auto").dim());
-        println!("{}", style("    ControlPath ~/.ssh/sockets/%r@%h-%p").dim());
-        println!("{}", style("    ControlPersist 600").dim());
-        return Ok(());
-    }
-
     // Ensure .ssh directory exists
     if let Some(ssh_dir) = config_path.parent() {
         if !ssh_dir.exists() {
@@ -140,14 +227,37 @@ pub fn setup_multiplexing() -> io::Result<()> {
         }
     }
 
-    // Append our config block
+    // Read existing config or start fresh
+    let existing_config = fs::read_to_string(&config_path).unwrap_or_default();
+
+    let mut blocks_to_add = Vec::new();
+    for host in hosts {
+        // Check if Host block already exists for this host
+        let host_pattern = format!("Host {host}");
+        if existing_config.lines().any(|line| line.trim() == host_pattern) {
+            println!(
+                "{} Found existing '{}' in SSH config.",
+                style("!").yellow(),
+                host_pattern,
+            );
+            println!("  Please manually verify ControlMaster settings for this host.");
+        } else {
+            blocks_to_add.push(multiplexing_config_block(host));
+        }
+    }
+
+    if blocks_to_add.is_empty() {
+        return Ok(());
+    }
+
+    // Append config blocks
     let new_config = if existing_config.is_empty() {
-        multiplexing_config_block()
+        blocks_to_add.join("")
     } else {
         format!(
             "{}\n{}",
             existing_config.trim_end(),
-            multiplexing_config_block()
+            blocks_to_add.join("")
         )
     };
 
@@ -159,7 +269,7 @@ pub fn setup_multiplexing() -> io::Result<()> {
         "{} SSH multiplexing is now configured!",
         style("✓").green().bold()
     );
-    println!("  Parallel git operations will now share a single SSH connection.");
+    println!("  Parallel git operations will now share a single SSH connection per host.");
 
     Ok(())
 }
@@ -173,7 +283,7 @@ pub fn print_multiplexing_hint() {
         "  Run {} to set up SSH multiplexing,",
         style("meta git setup-ssh").cyan()
     );
-    println!("  which allows parallel operations to share a single connection.");
+    println!("  which allows parallel operations to share a single connection per host.");
 }
 
 #[cfg(test)]
@@ -205,6 +315,110 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_ssh_host_scp_syntax() {
+        assert_eq!(
+            extract_ssh_host("git@github.com:org/repo.git"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("git@gitlab.example.com:group/project.git"),
+            Some("gitlab.example.com".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("deploy@bitbucket.org:team/repo.git"),
+            Some("bitbucket.org".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_ssh_url() {
+        assert_eq!(
+            extract_ssh_host("ssh://git@github.com/org/repo.git"),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("ssh://gitlab.example.com/group/project.git"),
+            Some("gitlab.example.com".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("ssh://user@gitea.local:2222/org/repo.git"),
+            Some("gitea.local".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_non_ssh() {
+        assert_eq!(
+            extract_ssh_host("https://github.com/org/repo.git"),
+            None
+        );
+        assert_eq!(
+            extract_ssh_host("http://github.com/org/repo.git"),
+            None
+        );
+        assert_eq!(extract_ssh_host("file:///path/to/repo"), None);
+        assert_eq!(extract_ssh_host("/local/path/to/repo"), None);
+        assert_eq!(extract_ssh_host(""), None);
+    }
+
+    #[test]
+    fn test_is_host_configured_specific_host() {
+        let config = "\
+Host github.com
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+";
+        assert!(is_host_configured(config, "github.com"));
+        assert!(!is_host_configured(config, "gitlab.com"));
+    }
+
+    #[test]
+    fn test_is_host_configured_wildcard() {
+        let config = "\
+Host *
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+    ControlPersist 600
+";
+        assert!(is_host_configured(config, "github.com"));
+        assert!(is_host_configured(config, "gitlab.com"));
+        assert!(is_host_configured(config, "anything.example.com"));
+    }
+
+    #[test]
+    fn test_is_host_configured_multiple_blocks() {
+        let config = "\
+Host github.com
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+
+Host gitlab.com
+    IdentityFile ~/.ssh/gitlab_key
+";
+        assert!(is_host_configured(config, "github.com"));
+        // gitlab.com has a block but no ControlMaster
+        assert!(!is_host_configured(config, "gitlab.com"));
+    }
+
+    #[test]
+    fn test_is_host_configured_multi_pattern_line() {
+        let config = "\
+Host github.com gitlab.com
+    ControlMaster auto
+    ControlPath ~/.ssh/sockets/%r@%h-%p
+";
+        assert!(is_host_configured(config, "github.com"));
+        assert!(is_host_configured(config, "gitlab.com"));
+        assert!(!is_host_configured(config, "bitbucket.org"));
+    }
+
+    #[test]
+    fn test_is_host_configured_empty() {
+        assert!(!is_host_configured("", "github.com"));
+    }
+
+    #[test]
     fn test_ssh_config_path() {
         // ssh_config_path should return Some path when HOME is set
         let path = ssh_config_path();
@@ -232,11 +446,19 @@ mod tests {
 
     #[test]
     fn test_multiplexing_config_block() {
-        let block = multiplexing_config_block();
+        let block = multiplexing_config_block("github.com");
         assert!(block.contains("Host github.com"));
         assert!(block.contains("ControlMaster auto"));
         assert!(block.contains("ControlPath"));
         assert!(block.contains("ControlPersist"));
+    }
+
+    #[test]
+    fn test_multiplexing_config_block_custom_host() {
+        let block = multiplexing_config_block("gitlab.example.com");
+        assert!(block.contains("Host gitlab.example.com"));
+        assert!(block.contains("ControlMaster auto"));
+        assert!(!block.contains("github.com"));
     }
 
     #[test]
