@@ -56,6 +56,81 @@ pub fn extract_ssh_host(url: &str) -> Option<String> {
     }
 }
 
+/// Normalize a git remote URL for comparison purposes.
+///
+/// Strips trailing `.git` suffix, trailing slashes, and converts
+/// `ssh://git@host/path` to SCP-like `git@host:path` form so that
+/// equivalent URLs compare equal.
+pub fn normalize_git_url(url: &str) -> String {
+    let mut s = url.trim().to_string();
+
+    // Strip trailing .git
+    if s.ends_with(".git") {
+        s.truncate(s.len() - 4);
+    }
+    // Strip trailing slashes
+    while s.ends_with('/') {
+        s.pop();
+    }
+
+    // Normalize ssh:// URLs to SCP-like form for consistent comparison
+    if let Some(rest) = s.strip_prefix("ssh://") {
+        // ssh://[user@]host[:port]/path -> user@host:path (drop port)
+        if let Some(slash_pos) = rest.find('/') {
+            let host_part = &rest[..slash_pos];
+            let path = &rest[slash_pos + 1..];
+            // Strip optional port
+            let host_no_port = if let Some(colon_pos) = host_part.rfind(':') {
+                // Only strip if after @ (it's a port, not user separator)
+                if host_part[colon_pos + 1..].chars().all(|c| c.is_ascii_digit()) {
+                    &host_part[..colon_pos]
+                } else {
+                    host_part
+                }
+            } else {
+                host_part
+            };
+            // Ensure user@ prefix (default to git@)
+            let with_user = if host_no_port.contains('@') {
+                host_no_port.to_string()
+            } else {
+                format!("git@{host_no_port}")
+            };
+            return format!("{with_user}:{path}");
+        }
+    }
+
+    s
+}
+
+/// Get the origin remote URL of a git repository.
+///
+/// Returns `None` if the directory doesn't exist, isn't a git repo,
+/// or has no `origin` remote.
+pub fn get_remote_url(repo_path: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(repo_path)
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if url.is_empty() {
+            None
+        } else {
+            Some(url)
+        }
+    } else {
+        None
+    }
+}
+
+/// Check whether two git remote URLs point to the same repository.
+pub fn urls_match(a: &str, b: &str) -> bool {
+    normalize_git_url(a) == normalize_git_url(b)
+}
+
 /// Get the path to the SSH config file
 fn ssh_config_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("config"))
@@ -467,5 +542,132 @@ Host github.com gitlab.com
         assert!(is_ssh_rate_limit_error("Connection closed by"));
         // Should not match different case (patterns are case-sensitive)
         assert!(!is_ssh_rate_limit_error("connection closed by"));
+    }
+
+    // ============ URL Normalization Tests ============
+
+    #[test]
+    fn test_normalize_strips_trailing_dot_git() {
+        assert_eq!(
+            normalize_git_url("git@github.com:org/repo.git"),
+            "git@github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_strips_trailing_slash() {
+        assert_eq!(
+            normalize_git_url("git@github.com:org/repo/"),
+            "git@github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_ssh_url_to_scp() {
+        assert_eq!(
+            normalize_git_url("ssh://git@github.com/org/repo.git"),
+            "git@github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_ssh_url_with_port() {
+        assert_eq!(
+            normalize_git_url("ssh://git@github.com:22/org/repo.git"),
+            "git@github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_ssh_url_no_user() {
+        // ssh://host/path should normalize to git@host:path
+        assert_eq!(
+            normalize_git_url("ssh://github.com/org/repo.git"),
+            "git@github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_https_unchanged() {
+        // HTTPS URLs don't get converted — they stay as-is (minus .git)
+        assert_eq!(
+            normalize_git_url("https://github.com/org/repo.git"),
+            "https://github.com/org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_scp_without_dot_git() {
+        assert_eq!(
+            normalize_git_url("git@github.com:org/repo"),
+            "git@github.com:org/repo"
+        );
+    }
+
+    #[test]
+    fn test_normalize_trims_whitespace() {
+        assert_eq!(
+            normalize_git_url("  git@github.com:org/repo.git  "),
+            "git@github.com:org/repo"
+        );
+    }
+
+    // ============ urls_match Tests ============
+
+    #[test]
+    fn test_urls_match_identical() {
+        assert!(urls_match(
+            "git@github.com:org/repo.git",
+            "git@github.com:org/repo.git"
+        ));
+    }
+
+    #[test]
+    fn test_urls_match_with_without_dot_git() {
+        assert!(urls_match(
+            "git@github.com:org/repo.git",
+            "git@github.com:org/repo"
+        ));
+    }
+
+    #[test]
+    fn test_urls_match_scp_vs_ssh_url() {
+        assert!(urls_match(
+            "git@github.com:org/repo.git",
+            "ssh://git@github.com/org/repo.git"
+        ));
+    }
+
+    #[test]
+    fn test_urls_match_ssh_url_with_port() {
+        assert!(urls_match(
+            "git@github.com:org/repo",
+            "ssh://git@github.com:22/org/repo.git"
+        ));
+    }
+
+    #[test]
+    fn test_urls_no_match_different_repos() {
+        assert!(!urls_match(
+            "git@github.com:org/repo-a.git",
+            "git@github.com:org/repo-b.git"
+        ));
+    }
+
+    #[test]
+    fn test_urls_no_match_ssh_vs_https() {
+        // SSH and HTTPS are genuinely different remotes
+        assert!(!urls_match(
+            "git@github.com:org/repo.git",
+            "https://github.com/org/repo.git"
+        ));
+    }
+
+    #[test]
+    fn test_urls_match_https_with_without_dot_git() {
+        assert!(urls_match(
+            "https://github.com/org/repo.git",
+            "https://github.com/org/repo"
+        ));
     }
 }
