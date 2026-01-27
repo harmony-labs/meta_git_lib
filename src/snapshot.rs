@@ -5,6 +5,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use meta_cli::git_utils;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -76,40 +77,9 @@ pub fn capture_repo_state(repo_path: &Path) -> Result<RepoState> {
 
     let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
 
-    // Get branch name (empty if detached HEAD)
-    let branch_output = Command::new("git")
-        .args(["symbolic-ref", "--short", "HEAD"])
-        .current_dir(repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to run git symbolic-ref")?;
+    let branch = git_utils::current_branch(repo_path);
 
-    let branch = if branch_output.status.success() {
-        let b = String::from_utf8_lossy(&branch_output.stdout)
-            .trim()
-            .to_string();
-        if b.is_empty() {
-            None
-        } else {
-            Some(b)
-        }
-    } else {
-        None // Detached HEAD
-    };
-
-    // Check if dirty (any output means dirty)
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to run git status --porcelain")?;
-
-    let dirty = !String::from_utf8_lossy(&status_output.stdout)
-        .trim()
-        .is_empty();
+    let dirty = git_utils::is_dirty(repo_path).unwrap_or(false);
 
     Ok(RepoState {
         sha,
@@ -127,17 +97,7 @@ pub fn restore_repo_state(repo_path: &Path, state: &RepoState, force: bool) -> R
         .unwrap_or_else(|| ".".to_string());
 
     // Check if repo is dirty and needs stashing
-    let status_output = Command::new("git")
-        .args(["status", "--porcelain"])
-        .current_dir(repo_path)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .context("Failed to check git status")?;
-
-    let is_dirty = !String::from_utf8_lossy(&status_output.stdout)
-        .trim()
-        .is_empty();
+    let is_dirty = git_utils::is_dirty(repo_path).unwrap_or(false);
 
     let mut stashed = false;
 
