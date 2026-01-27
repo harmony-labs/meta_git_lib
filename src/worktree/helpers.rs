@@ -316,3 +316,222 @@ pub fn ensure_worktrees_in_gitignore(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── validate_worktree_name ──────────────────────────────
+
+    #[test]
+    fn validate_name_accepts_simple_alphanumeric() {
+        assert!(validate_worktree_name("feature1").is_ok());
+    }
+
+    #[test]
+    fn validate_name_accepts_hyphens_and_underscores() {
+        assert!(validate_worktree_name("my-feature_v2").is_ok());
+    }
+
+    #[test]
+    fn validate_name_rejects_empty() {
+        let err = validate_worktree_name("").unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn validate_name_rejects_leading_dot() {
+        let err = validate_worktree_name(".hidden").unwrap_err();
+        assert!(err.to_string().contains("cannot start with '.'"));
+    }
+
+    #[test]
+    fn validate_name_rejects_forward_slash() {
+        let err = validate_worktree_name("a/b").unwrap_err();
+        assert!(err.to_string().contains("path separators"));
+    }
+
+    #[test]
+    fn validate_name_rejects_backslash() {
+        let err = validate_worktree_name("a\\b").unwrap_err();
+        assert!(err.to_string().contains("path separators"));
+    }
+
+    #[test]
+    fn validate_name_rejects_special_characters() {
+        let err = validate_worktree_name("feat@work").unwrap_err();
+        assert!(err.to_string().contains("only ASCII alphanumeric"));
+    }
+
+    #[test]
+    fn validate_name_rejects_spaces() {
+        let err = validate_worktree_name("my feature").unwrap_err();
+        assert!(err.to_string().contains("only ASCII alphanumeric"));
+    }
+
+    // ── parse_duration ──────────────────────────────────────
+
+    #[test]
+    fn parse_duration_bare_seconds() {
+        assert_eq!(parse_duration("300").unwrap(), 300);
+    }
+
+    #[test]
+    fn parse_duration_seconds_suffix() {
+        assert_eq!(parse_duration("30s").unwrap(), 30);
+    }
+
+    #[test]
+    fn parse_duration_minutes() {
+        assert_eq!(parse_duration("5m").unwrap(), 300);
+    }
+
+    #[test]
+    fn parse_duration_hours() {
+        assert_eq!(parse_duration("2h").unwrap(), 7200);
+    }
+
+    #[test]
+    fn parse_duration_days() {
+        assert_eq!(parse_duration("1d").unwrap(), 86400);
+    }
+
+    #[test]
+    fn parse_duration_weeks() {
+        assert_eq!(parse_duration("1w").unwrap(), 604800);
+    }
+
+    #[test]
+    fn parse_duration_trims_whitespace() {
+        assert_eq!(parse_duration("  5m  ").unwrap(), 300);
+    }
+
+    #[test]
+    fn parse_duration_rejects_empty() {
+        assert!(parse_duration("").is_err());
+        assert!(parse_duration("   ").is_err());
+    }
+
+    #[test]
+    fn parse_duration_rejects_invalid_suffix() {
+        let err = parse_duration("10x").unwrap_err();
+        assert!(err.to_string().contains("Invalid duration suffix"));
+    }
+
+    #[test]
+    fn parse_duration_rejects_non_numeric() {
+        assert!(parse_duration("abcs").is_err());
+    }
+
+    // ── format_duration ─────────────────────────────────────
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(45), "45s");
+    }
+
+    #[test]
+    fn format_duration_exact_minutes() {
+        assert_eq!(format_duration(300), "5m");
+    }
+
+    #[test]
+    fn format_duration_exact_hours() {
+        assert_eq!(format_duration(7200), "2h");
+    }
+
+    #[test]
+    fn format_duration_exact_days() {
+        assert_eq!(format_duration(86400), "1d");
+    }
+
+    #[test]
+    fn format_duration_exact_weeks() {
+        assert_eq!(format_duration(604800), "1w");
+    }
+
+    #[test]
+    fn format_duration_non_exact_falls_to_seconds() {
+        // 90 seconds = 1m30s, but since 90 % 60 != 0, falls through to seconds
+        assert_eq!(format_duration(90), "90s");
+    }
+
+    #[test]
+    fn format_duration_zero() {
+        assert_eq!(format_duration(0), "0s");
+    }
+
+    #[test]
+    fn format_duration_negative() {
+        assert_eq!(format_duration(-3600), "-1h");
+    }
+
+    #[test]
+    fn format_duration_negative_seconds() {
+        assert_eq!(format_duration(-45), "-45s");
+    }
+
+    // ── parse_duration / format_duration round-trip ──────────
+
+    #[test]
+    fn duration_round_trip_exact_units() {
+        for input in &["30s", "5m", "2h", "1d", "1w"] {
+            let secs = parse_duration(input).unwrap();
+            let formatted = format_duration(secs as i64);
+            assert_eq!(&formatted, input, "round-trip failed for {input}");
+        }
+    }
+
+    // ── resolve_branch ──────────────────────────────────────
+
+    #[test]
+    fn resolve_branch_per_repo_takes_priority() {
+        assert_eq!(
+            resolve_branch("task", Some("flag-branch"), Some("repo-branch")),
+            "repo-branch"
+        );
+    }
+
+    #[test]
+    fn resolve_branch_flag_fallback() {
+        assert_eq!(
+            resolve_branch("task", Some("flag-branch"), None),
+            "flag-branch"
+        );
+    }
+
+    #[test]
+    fn resolve_branch_defaults_to_task_name() {
+        assert_eq!(resolve_branch("my-task", None, None), "my-task");
+    }
+
+    // ── ensure_worktrees_in_gitignore ───────────────────────
+
+    #[test]
+    fn gitignore_creates_file_if_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        ensure_worktrees_in_gitignore(tmp.path(), ".worktrees", true).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(content.contains(".worktrees/"));
+    }
+
+    #[test]
+    fn gitignore_appends_if_not_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), "node_modules/\n").unwrap();
+        ensure_worktrees_in_gitignore(tmp.path(), ".worktrees", true).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(content.contains("node_modules/"));
+        assert!(content.contains(".worktrees/"));
+    }
+
+    #[test]
+    fn gitignore_skips_if_already_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join(".gitignore"), ".worktrees/\n").unwrap();
+        ensure_worktrees_in_gitignore(tmp.path(), ".worktrees", true).unwrap();
+        let content = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        // Should appear exactly once
+        assert_eq!(content.matches(".worktrees/").count(), 1);
+    }
+}

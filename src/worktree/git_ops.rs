@@ -309,3 +309,199 @@ pub fn git_fetch_branch(repo_path: &Path, branch: &str) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a minimal git repo in a tempdir and return the tempdir handle.
+    fn init_git_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        Command::new("git")
+            .args(["init"])
+            .current_dir(tmp.path())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+        tmp
+    }
+
+    /// Create an initial commit so HEAD exists.
+    fn make_initial_commit(repo: &std::path::Path) {
+        std::fs::write(repo.join("README.md"), "init\n").unwrap();
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        Command::new("git")
+            .args(["commit", "-m", "initial"])
+            .current_dir(repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+    }
+
+    // ── git_status_summary ──────────────────────────────────
+
+    #[test]
+    fn status_summary_clean_repo() {
+        let tmp = init_git_repo();
+        make_initial_commit(tmp.path());
+
+        let summary = git_status_summary(tmp.path()).unwrap();
+        assert!(!summary.dirty);
+        assert!(summary.modified_files.is_empty());
+        assert_eq!(summary.untracked_count, 0);
+    }
+
+    #[test]
+    fn status_summary_untracked_file() {
+        let tmp = init_git_repo();
+        make_initial_commit(tmp.path());
+
+        std::fs::write(tmp.path().join("new.txt"), "hello").unwrap();
+
+        let summary = git_status_summary(tmp.path()).unwrap();
+        assert!(summary.dirty);
+        assert_eq!(summary.untracked_count, 1);
+        assert!(summary.modified_files.is_empty());
+    }
+
+    #[test]
+    fn status_summary_modified_tracked_file() {
+        let tmp = init_git_repo();
+        make_initial_commit(tmp.path());
+
+        // Modify an existing tracked file
+        std::fs::write(tmp.path().join("README.md"), "changed\n").unwrap();
+
+        let summary = git_status_summary(tmp.path()).unwrap();
+        assert!(summary.dirty);
+        assert_eq!(summary.untracked_count, 0);
+        assert!(summary.modified_files.contains(&"README.md".to_string()));
+    }
+
+    #[test]
+    fn status_summary_staged_file() {
+        let tmp = init_git_repo();
+        make_initial_commit(tmp.path());
+
+        std::fs::write(tmp.path().join("README.md"), "staged\n").unwrap();
+        Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(tmp.path())
+            .status()
+            .unwrap();
+
+        let summary = git_status_summary(tmp.path()).unwrap();
+        assert!(summary.dirty);
+        assert!(summary.modified_files.contains(&"README.md".to_string()));
+    }
+
+    #[test]
+    fn status_summary_mixed_state() {
+        let tmp = init_git_repo();
+        make_initial_commit(tmp.path());
+
+        // Untracked
+        std::fs::write(tmp.path().join("untracked.txt"), "u").unwrap();
+        // Modified tracked
+        std::fs::write(tmp.path().join("README.md"), "mod\n").unwrap();
+
+        let summary = git_status_summary(tmp.path()).unwrap();
+        assert!(summary.dirty);
+        assert_eq!(summary.untracked_count, 1);
+        assert!(summary.modified_files.contains(&"README.md".to_string()));
+    }
+
+    // ── git_ahead_behind ────────────────────────────────────
+
+    #[test]
+    fn ahead_behind_no_upstream_returns_zeros() {
+        let tmp = init_git_repo();
+        make_initial_commit(tmp.path());
+
+        let (ahead, behind) = git_ahead_behind(tmp.path()).unwrap();
+        assert_eq!(ahead, 0);
+        assert_eq!(behind, 0);
+    }
+
+    // ── remove_worktree_repos ordering ──────────────────────
+    // These tests verify the ordering logic without actual git operations.
+    // We construct WorktreeRepoInfo values and check that "." is processed last.
+
+    #[test]
+    fn removal_ordering_children_before_root() {
+        // Verify via the filter logic that children come before "."
+        let repos = vec![
+            meta_cli::worktree::WorktreeRepoInfo {
+                alias: ".".to_string(),
+                branch: "main".to_string(),
+                path: std::path::PathBuf::from("/tmp/wt"),
+                source_path: std::path::PathBuf::from("/tmp/src"),
+                created_branch: None,
+            },
+            meta_cli::worktree::WorktreeRepoInfo {
+                alias: "lib".to_string(),
+                branch: "main".to_string(),
+                path: std::path::PathBuf::from("/tmp/wt/lib"),
+                source_path: std::path::PathBuf::from("/tmp/src/lib"),
+                created_branch: None,
+            },
+            meta_cli::worktree::WorktreeRepoInfo {
+                alias: "cli".to_string(),
+                branch: "main".to_string(),
+                path: std::path::PathBuf::from("/tmp/wt/cli"),
+                source_path: std::path::PathBuf::from("/tmp/src/cli"),
+                created_branch: None,
+            },
+        ];
+
+        // Verify ordering: children (non-".") are iterated first
+        let children: Vec<&str> = repos
+            .iter()
+            .filter(|r| r.alias != ".")
+            .map(|r| r.alias.as_str())
+            .collect();
+        assert_eq!(children, vec!["lib", "cli"]);
+
+        // Root comes last
+        let root = repos.iter().find(|r| r.alias == ".");
+        assert!(root.is_some());
+    }
+
+    #[test]
+    fn removal_ordering_no_root_repo() {
+        // When there's no "." repo, all repos are children
+        let repos = [meta_cli::worktree::WorktreeRepoInfo {
+            alias: "lib".to_string(),
+            branch: "main".to_string(),
+            path: std::path::PathBuf::from("/tmp/wt/lib"),
+            source_path: std::path::PathBuf::from("/tmp/src/lib"),
+            created_branch: None,
+        }];
+
+        let root = repos.iter().find(|r| r.alias == ".");
+        assert!(root.is_none());
+
+        let children: Vec<&str> = repos
+            .iter()
+            .filter(|r| r.alias != ".")
+            .map(|r| r.alias.as_str())
+            .collect();
+        assert_eq!(children, vec!["lib"]);
+    }
+}

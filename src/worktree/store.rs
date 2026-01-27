@@ -102,3 +102,73 @@ pub fn entry_ttl_remaining(entry: &WorktreeStoreEntry, now_epoch: i64) -> Option
         created + ttl as i64 - now_epoch
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn make_entry(created_at: &str, ttl_seconds: Option<u64>) -> WorktreeStoreEntry {
+        WorktreeStoreEntry {
+            name: "test-wt".to_string(),
+            project: "/tmp/project".to_string(),
+            created_at: created_at.to_string(),
+            ephemeral: ttl_seconds.is_some(),
+            ttl_seconds,
+            repos: vec![],
+            custom: HashMap::new(),
+        }
+    }
+
+    // ── store_key ───────────────────────────────────────────
+
+    #[test]
+    fn store_key_returns_path_string() {
+        let path = std::path::Path::new("/home/user/.worktrees/feat-1");
+        assert_eq!(store_key(path), "/home/user/.worktrees/feat-1");
+    }
+
+    // ── entry_ttl_remaining ─────────────────────────────────
+
+    #[test]
+    fn ttl_remaining_none_when_no_ttl() {
+        let entry = make_entry("2025-01-01T00:00:00Z", None);
+        assert!(entry_ttl_remaining(&entry, 1_700_000_000).is_none());
+    }
+
+    #[test]
+    fn ttl_remaining_positive_when_not_expired() {
+        // created_at = 2025-01-01T00:00:00Z = epoch 1735689600
+        // ttl = 3600s (1 hour)
+        // now = 1735689600 + 1800 (30 min later)
+        // remaining = 1735689600 + 3600 - (1735689600 + 1800) = 1800
+        let entry = make_entry("2025-01-01T00:00:00Z", Some(3600));
+        let created_epoch = 1_735_689_600i64;
+        let remaining = entry_ttl_remaining(&entry, created_epoch + 1800).unwrap();
+        assert_eq!(remaining, 1800);
+    }
+
+    #[test]
+    fn ttl_remaining_negative_when_expired() {
+        // created + ttl < now → negative
+        let entry = make_entry("2025-01-01T00:00:00Z", Some(3600));
+        let created_epoch = 1_735_689_600i64;
+        let remaining = entry_ttl_remaining(&entry, created_epoch + 7200).unwrap();
+        assert_eq!(remaining, -3600);
+    }
+
+    #[test]
+    fn ttl_remaining_zero_at_exact_expiry() {
+        let entry = make_entry("2025-01-01T00:00:00Z", Some(3600));
+        let created_epoch = 1_735_689_600i64;
+        let remaining = entry_ttl_remaining(&entry, created_epoch + 3600).unwrap();
+        assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn ttl_remaining_malformed_date_returns_max() {
+        let entry = make_entry("not-a-date", Some(3600));
+        let remaining = entry_ttl_remaining(&entry, 1_700_000_000).unwrap();
+        assert_eq!(remaining, i64::MAX);
+    }
+}

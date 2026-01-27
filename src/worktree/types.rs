@@ -220,3 +220,103 @@ pub struct GitStatusSummary {
     pub modified_files: Vec<String>,
     pub untracked_count: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── RepoSpec FromStr ────────────────────────────────────
+
+    #[test]
+    fn repo_spec_parse_alias_only() {
+        let spec: RepoSpec = "meta_cli".parse().unwrap();
+        assert_eq!(spec.alias, "meta_cli");
+        assert!(spec.branch.is_none());
+    }
+
+    #[test]
+    fn repo_spec_parse_alias_with_branch() {
+        let spec: RepoSpec = "meta_cli:feature-x".parse().unwrap();
+        assert_eq!(spec.alias, "meta_cli");
+        assert_eq!(spec.branch.as_deref(), Some("feature-x"));
+    }
+
+    #[test]
+    fn repo_spec_parse_branch_with_colon() {
+        // "foo:bar:baz" → alias="foo", branch="bar:baz" (split_once)
+        let spec: RepoSpec = "foo:bar:baz".parse().unwrap();
+        assert_eq!(spec.alias, "foo");
+        assert_eq!(spec.branch.as_deref(), Some("bar:baz"));
+    }
+
+    #[test]
+    fn repo_spec_parse_empty_string() {
+        let spec: RepoSpec = "".parse().unwrap();
+        assert_eq!(spec.alias, "");
+        assert!(spec.branch.is_none());
+    }
+
+    // ── RepoSpec Display ────────────────────────────────────
+
+    #[test]
+    fn repo_spec_display_alias_only() {
+        let spec = RepoSpec {
+            alias: "meta_cli".to_string(),
+            branch: None,
+        };
+        assert_eq!(spec.to_string(), "meta_cli");
+    }
+
+    #[test]
+    fn repo_spec_display_alias_with_branch() {
+        let spec = RepoSpec {
+            alias: "meta_cli".to_string(),
+            branch: Some("feature-x".to_string()),
+        };
+        assert_eq!(spec.to_string(), "meta_cli:feature-x");
+    }
+
+    // ── RepoSpec round-trip ─────────────────────────────────
+
+    #[test]
+    fn repo_spec_round_trip_alias_only() {
+        let input = "meta_core";
+        let spec: RepoSpec = input.parse().unwrap();
+        assert_eq!(spec.to_string(), input);
+    }
+
+    #[test]
+    fn repo_spec_round_trip_with_branch() {
+        let input = "meta_cli:my-branch";
+        let spec: RepoSpec = input.parse().unwrap();
+        assert_eq!(spec.to_string(), input);
+    }
+
+    // ── StoreRepoEntry From<CreateRepoEntry> ────────────────
+
+    #[test]
+    fn store_entry_from_create_entry() {
+        let create = CreateRepoEntry {
+            alias: "lib".to_string(),
+            path: "/tmp/lib".to_string(),
+            branch: "main".to_string(),
+            created_branch: true,
+        };
+        let store: StoreRepoEntry = StoreRepoEntry::from(&create);
+        assert_eq!(store.alias, "lib");
+        assert_eq!(store.branch, "main");
+        assert!(store.created_branch);
+    }
+
+    #[test]
+    fn store_entry_from_create_entry_no_created_branch() {
+        let create = CreateRepoEntry {
+            alias: "app".to_string(),
+            path: "/tmp/app".to_string(),
+            branch: "develop".to_string(),
+            created_branch: false,
+        };
+        let store: StoreRepoEntry = StoreRepoEntry::from(&create);
+        assert!(!store.created_branch);
+    }
+}
