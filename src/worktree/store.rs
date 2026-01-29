@@ -16,11 +16,17 @@ use super::types::{StoreRepoEntry, WorktreeStoreData, WorktreeStoreEntry};
 /// If canonicalization fails (e.g., path doesn't exist yet), falls back
 /// to using the path as-is to maintain backward compatibility.
 fn store_key(worktree_path: &Path) -> String {
-    worktree_path
-        .canonicalize()
-        .unwrap_or_else(|_| worktree_path.to_path_buf())
-        .to_string_lossy()
-        .to_string()
+    match worktree_path.canonicalize() {
+        Ok(canonical) => canonical.to_string_lossy().into_owned(),
+        Err(e) => {
+            log::debug!(
+                "Failed to canonicalize path '{}': {}. Using original path.",
+                worktree_path.display(),
+                e
+            );
+            worktree_path.to_string_lossy().into_owned()
+        }
+    }
 }
 
 fn store_path() -> PathBuf {
