@@ -252,4 +252,259 @@ mod tests {
         let remaining = entry_ttl_remaining(&entry, 1_700_000_000).unwrap();
         assert_eq!(remaining, i64::MAX);
     }
+
+    // ── Concurrent store access (file locking) ─────────────
+    // Note: These tests use #[serial] because they access the shared global store at ~/.meta/worktree.json
+    // Running them in parallel would cause flaky failures due to shared state.
+
+    #[test]
+    #[serial_test::serial]
+    fn store_add_and_remove_sequential() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wt_path = temp_dir.path().join("test-wt");
+        std::fs::create_dir(&wt_path).unwrap();
+
+        // Add entry
+        let entry = make_entry("2025-01-01T00:00:00Z", None);
+        store_add(&wt_path, entry.clone()).unwrap();
+
+        // Verify it was added
+        let data = store_list().unwrap();
+        let key = store_key(&wt_path);
+        assert!(data.worktrees.contains_key(&key));
+
+        // Remove entry
+        store_remove(&wt_path).unwrap();
+
+        // Verify it was removed
+        let data = store_list().unwrap();
+        assert!(!data.worktrees.contains_key(&key));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn store_remove_batch_removes_multiple() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wt1 = temp_dir.path().join("wt1");
+        let wt2 = temp_dir.path().join("wt2");
+        let wt3 = temp_dir.path().join("wt3");
+
+        std::fs::create_dir(&wt1).unwrap();
+        std::fs::create_dir(&wt2).unwrap();
+        std::fs::create_dir(&wt3).unwrap();
+
+        // Add three entries
+        store_add(&wt1, make_entry("2025-01-01T00:00:00Z", None)).unwrap();
+        store_add(&wt2, make_entry("2025-01-01T00:00:00Z", None)).unwrap();
+        store_add(&wt3, make_entry("2025-01-01T00:00:00Z", None)).unwrap();
+
+        // Remove two in batch
+        let keys_to_remove = vec![store_key(&wt1), store_key(&wt2)];
+        store_remove_batch(&keys_to_remove).unwrap();
+
+        // Verify only wt3 remains
+        let data = store_list().unwrap();
+        assert!(!data.worktrees.contains_key(&store_key(&wt1)));
+        assert!(!data.worktrees.contains_key(&store_key(&wt2)));
+        assert!(data.worktrees.contains_key(&store_key(&wt3)));
+
+        // Cleanup
+        store_remove(&wt3).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn store_extend_repos_adds_to_existing_entry() {
+        // Ensure clean store
+        let store = store_path();
+        meta_core::data_dir::ensure_meta_dir().unwrap();
+        std::fs::write(&store, b"{\"worktrees\":{}}").unwrap();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wt_path = temp_dir.path().join("extend-wt");
+        std::fs::create_dir(&wt_path).unwrap();
+
+        // Canonicalize the path immediately after creating it to ensure consistency
+        let wt_path = wt_path.canonicalize().unwrap();
+
+        // Add entry with one repo
+        let mut entry = make_entry("2025-01-01T00:00:00Z", None);
+        entry.repos = vec![StoreRepoEntry {
+            alias: "repo1".to_string(),
+            branch: "main".to_string(),
+            created_branch: false,
+        }];
+        store_add(&wt_path, entry).unwrap();
+
+        // Extend with another repo
+        let new_repos = vec![StoreRepoEntry {
+            alias: "repo2".to_string(),
+            branch: "main".to_string(),
+            created_branch: false,
+        }];
+        store_extend_repos(&wt_path, new_repos).unwrap();
+
+        // Verify both repos are present
+        let data = store_list().unwrap();
+        let key = store_key(&wt_path);
+        let stored_entry = data.worktrees.get(&key).unwrap();
+        assert_eq!(stored_entry.repos.len(), 2);
+        assert!(stored_entry.repos.iter().any(|r| r.alias == "repo1"));
+        assert!(stored_entry.repos.iter().any(|r| r.alias == "repo2"));
+
+        // Cleanup
+        store_remove(&wt_path).unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn store_operations_handle_nonexistent_store_gracefully() {
+        // Ensure store doesn't exist
+        let store = store_path();
+        let _ = std::fs::remove_file(&store);
+
+        // List should return empty, not error
+        let data = store_list().unwrap();
+        assert!(data.worktrees.is_empty());
+
+        // Remove on non-existent store should succeed
+        let temp_dir = tempfile::tempdir().unwrap();
+        let wt_path = temp_dir.path().join("nonexistent-wt");
+        assert!(store_remove(&wt_path).is_ok());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_store_adds_do_not_conflict() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = Arc::new(tempfile::tempdir().unwrap());
+
+        // Spawn multiple threads that add worktrees concurrently
+        let handles: Vec<_> = (0..5)
+            .map(|i| {
+                let temp_dir = Arc::clone(&temp_dir);
+                thread::spawn(move || {
+                    let wt_path = temp_dir.path().join(format!("concurrent-add-{}", i));
+                    std::fs::create_dir(&wt_path).unwrap();
+                    let mut entry = make_entry("2025-01-01T00:00:00Z", None);
+                    entry.name = format!("concurrent-add-{}", i);
+                    store_add(&wt_path, entry).unwrap();
+                    wt_path
+                })
+            })
+            .collect();
+
+        // Wait for all threads
+        let paths: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        // Verify all 5 entries were added (check each specific one exists)
+        let data = store_list().unwrap();
+        for path in &paths {
+            let key = store_key(path);
+            assert!(
+                data.worktrees.contains_key(&key),
+                "Concurrent add failed: {} not found in store",
+                key
+            );
+        }
+
+        // Cleanup - batch remove for efficiency
+        let keys: Vec<String> = paths.iter().map(|p| store_key(p)).collect();
+        store_remove_batch(&keys).unwrap();
+
+        // Verify cleanup worked
+        let data_after = store_list().unwrap();
+        for key in &keys {
+            assert!(
+                !data_after.worktrees.contains_key(key),
+                "Cleanup failed: {} still in store",
+                key
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn concurrent_batch_removes_handle_overlapping_keys() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let temp_dir = Arc::new(tempfile::tempdir().unwrap());
+
+        // Add 10 worktrees
+        let paths: Vec<_> = (0..10)
+            .map(|i| {
+                let wt_path = temp_dir.path().join(format!("batch-rm-{}", i));
+                std::fs::create_dir(&wt_path).unwrap();
+                let mut entry = make_entry("2025-01-01T00:00:00Z", None);
+                entry.name = format!("batch-rm-{}", i);
+                store_add(&wt_path, entry).unwrap();
+                wt_path
+            })
+            .collect();
+
+        let keys_before: Vec<String> = paths.iter().map(|p| store_key(p)).collect();
+
+        // Spawn threads that remove overlapping batches
+        let handles: Vec<_> = (0..3)
+            .map(|batch_id| {
+                let paths = paths.clone();
+                thread::spawn(move || {
+                    // Each thread removes a different subset
+                    let start = batch_id * 3;
+                    let end = std::cmp::min(start + 4, paths.len());
+                    let keys: Vec<String> = paths[start..end]
+                        .iter()
+                        .map(|p| store_key(p))
+                        .collect();
+                    store_remove_batch(&keys).unwrap();
+                })
+            })
+            .collect();
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // All entries should be removed (with possible duplicates in batches)
+        let data = store_list().unwrap();
+        for key in &keys_before {
+            assert!(!data.worktrees.contains_key(key), "Key {} should be removed", key);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn store_handles_corrupted_data_file() {
+        let store = store_path();
+
+        // Clean up by ensuring a fresh empty store
+        meta_core::data_dir::ensure_meta_dir().unwrap();
+        std::fs::write(&store, b"{\"worktrees\":{}}").unwrap();
+
+        // Write invalid JSON
+        meta_core::data_dir::ensure_meta_dir().unwrap();
+        std::fs::write(&store, b"not valid json").unwrap();
+
+        // store_list should handle corruption gracefully
+        // (either returns error or returns default empty store)
+        let result = store_list();
+
+        // Accept either behavior: error or default empty store
+        match result {
+            Ok(data) => {
+                // If it returns a default, it should be empty
+                assert!(data.worktrees.is_empty(), "Corrupted store should return empty data");
+            }
+            Err(_) => {
+                // Error is also acceptable
+            }
+        }
+
+        // Clean up by restoring a valid empty store (don't just remove the file)
+        std::fs::write(&store, b"{\"worktrees\":{}}").unwrap();
+    }
 }
