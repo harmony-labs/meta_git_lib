@@ -8,8 +8,19 @@ use std::path::{Path, PathBuf};
 use super::types::{StoreRepoEntry, WorktreeStoreData, WorktreeStoreEntry};
 
 /// Derive the store key from a worktree path.
+///
+/// Attempts to canonicalize the path to resolve symlinks and normalize
+/// path components. This prevents collisions when the same physical
+/// directory is referenced via different paths (symlinks, relative paths, etc.).
+///
+/// If canonicalization fails (e.g., path doesn't exist yet), falls back
+/// to using the path as-is to maintain backward compatibility.
 fn store_key(worktree_path: &Path) -> String {
-    worktree_path.to_string_lossy().to_string()
+    worktree_path
+        .canonicalize()
+        .unwrap_or_else(|_| worktree_path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
 }
 
 fn store_path() -> PathBuf {
@@ -125,7 +136,71 @@ mod tests {
     #[test]
     fn store_key_returns_path_string() {
         let path = std::path::Path::new("/home/user/.worktrees/feat-1");
+        // Note: For non-existent paths, store_key falls back to original path
         assert_eq!(store_key(path), "/home/user/.worktrees/feat-1");
+    }
+
+    #[test]
+    fn store_key_canonicalizes_existing_paths() {
+        // Create a temp directory to test canonicalization
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp_path = temp_dir.path();
+
+        // Canonicalize the temp dir to get the absolute, resolved path
+        let canonical = temp_path.canonicalize().unwrap();
+
+        // store_key should return the canonical path
+        assert_eq!(store_key(temp_path), canonical.to_string_lossy().to_string());
+    }
+
+    #[test]
+    fn store_key_resolves_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let real_dir = temp_dir.path().join("real");
+        let symlink_path = temp_dir.path().join("link");
+
+        std::fs::create_dir(&real_dir).unwrap();
+        symlink(&real_dir, &symlink_path).unwrap();
+
+        // Both paths should resolve to the same canonical key
+        let key_real = store_key(&real_dir);
+        let key_symlink = store_key(&symlink_path);
+
+        assert_eq!(
+            key_real, key_symlink,
+            "Symlink and real path should produce the same store key"
+        );
+    }
+
+    #[test]
+    fn store_key_handles_nonexistent_paths() {
+        // For non-existent paths, should fall back to original path
+        let path = std::path::Path::new("/nonexistent/path/to/worktree");
+        assert_eq!(store_key(path), "/nonexistent/path/to/worktree");
+    }
+
+    #[test]
+    fn store_key_normalizes_relative_components() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let real_path = temp_dir.path();
+
+        // Create a subdirectory so the path exists
+        let subdir = real_path.join("subdir");
+        std::fs::create_dir(&subdir).unwrap();
+
+        // Create a path with .. components that resolves back to real_path
+        let path_with_dots = subdir.join("..").join(".");
+
+        // Both should resolve to the same canonical path
+        let key_clean = store_key(real_path);
+        let key_with_dots = store_key(&path_with_dots);
+
+        assert_eq!(
+            key_clean, key_with_dots,
+            "Paths with . and .. should normalize to same key"
+        );
     }
 
     // ── entry_ttl_remaining ─────────────────────────────────
