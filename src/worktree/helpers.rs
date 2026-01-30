@@ -132,6 +132,40 @@ pub fn load_projects(meta_dir: &Path) -> Result<Vec<meta_cli::config::ProjectInf
     Ok(projects)
 }
 
+/// Load projects and optionally include the root repo as ".".
+///
+/// When `include_root` is true and the meta_dir is itself a git repository,
+/// the root repo is prepended to the list as "." (alias "."). This ensures
+/// the root repo (which child repos may depend on) is processed first.
+///
+/// The root repo is an implicit dependency of child repos because it contains:
+/// - Workspace configuration (Cargo.toml)
+/// - Shared config files (.claude/, etc.)
+/// - Build scripts and other shared resources
+pub fn load_projects_with_root(
+    meta_dir: &Path,
+    include_root: bool,
+) -> Result<Vec<meta_cli::config::ProjectInfo>> {
+    let mut projects = load_projects(meta_dir)?;
+
+    if include_root && meta_dir.join(".git").exists() {
+        // Prepend root repo so it's processed first (dependencies come first)
+        projects.insert(
+            0,
+            meta_cli::config::ProjectInfo {
+                name: ".".to_string(),
+                path: ".".to_string(),
+                repo: String::new(), // Root repo doesn't have a remote URL in this context
+                tags: vec![],
+                provides: vec![],
+                depends_on: vec![],
+            },
+        );
+    }
+
+    Ok(projects)
+}
+
 /// Look up a project by alias, returning an error with valid aliases on miss.
 pub fn lookup_project<'a>(
     projects: &'a [meta_cli::config::ProjectInfo],
