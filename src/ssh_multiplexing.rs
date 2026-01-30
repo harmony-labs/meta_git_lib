@@ -5,9 +5,32 @@
 //! allows multiple sessions to share a single TCP connection, avoiding this issue.
 
 use console::style;
+use serde::Deserialize;
 use std::fs;
 use std::io::{self, Write};
 use std::path::PathBuf;
+
+/// Default ControlPersist duration in seconds (10 minutes)
+pub const DEFAULT_CONTROL_PERSIST: u32 = 600;
+
+/// SSH multiplexing configuration options.
+///
+/// Can be loaded from `.meta.yaml` under the `ssh:` key:
+/// ```yaml
+/// ssh:
+///   control_persist: 300  # 5 minutes
+/// ```
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct SshConfig {
+    /// Duration in seconds to keep SSH connections open after last use.
+    /// Default: 600 (10 minutes)
+    #[serde(default = "default_control_persist")]
+    pub control_persist: u32,
+}
+
+fn default_control_persist() -> u32 {
+    DEFAULT_CONTROL_PERSIST
+}
 
 /// Patterns that indicate SSH rate-limiting or connection issues
 const SSH_ERROR_PATTERNS: &[&str] = &[
@@ -281,19 +304,28 @@ fn is_host_configured(content: &str, host: &str) -> bool {
 }
 
 /// The configuration block to add for SSH multiplexing for a given host.
-fn multiplexing_config_block(host: &str) -> String {
+///
+/// Uses the provided ControlPersist duration (in seconds), or the default (600s)
+/// if not specified.
+fn multiplexing_config_block(host: &str, control_persist: Option<u32>) -> String {
+    let persist = control_persist.unwrap_or(DEFAULT_CONTROL_PERSIST);
     format!(
         "\n# SSH multiplexing for faster parallel git operations\n\
          Host {host}\n    \
          ControlMaster auto\n    \
          ControlPath ~/.ssh/sockets/%r@%h-%p\n    \
-         ControlPersist 600\n"
+         ControlPersist {persist}\n"
     )
 }
 
 /// Prompt user and set up SSH multiplexing for the given hosts.
 /// Returns Ok(true) if setup was completed, Ok(false) if user declined.
-pub fn prompt_and_setup_multiplexing(hosts: &[&str]) -> io::Result<bool> {
+///
+/// If `config` is provided, uses its `control_persist` value. Otherwise uses default (600s).
+pub fn prompt_and_setup_multiplexing(
+    hosts: &[&str],
+    config: Option<&SshConfig>,
+) -> io::Result<bool> {
     // Filter to only unconfigured hosts
     let config_content = ssh_config_path()
         .and_then(|p| fs::read_to_string(p).ok())
@@ -307,6 +339,8 @@ pub fn prompt_and_setup_multiplexing(hosts: &[&str]) -> io::Result<bool> {
     if unconfigured.is_empty() {
         return Ok(true);
     }
+
+    let control_persist = config.map(|c| c.control_persist);
 
     println!();
     println!("{}", style("SSH Multiplexing Setup").bold().cyan());
@@ -330,7 +364,10 @@ pub fn prompt_and_setup_multiplexing(hosts: &[&str]) -> io::Result<bool> {
         style("~/.ssh/config").yellow()
     );
     for host in &unconfigured {
-        print!("{}", style(multiplexing_config_block(host)).dim());
+        print!(
+            "{}",
+            style(multiplexing_config_block(host, control_persist)).dim()
+        );
     }
 
     print!("Would you like to set this up now? [y/N]: ");
@@ -344,12 +381,14 @@ pub fn prompt_and_setup_multiplexing(hosts: &[&str]) -> io::Result<bool> {
         return Ok(false);
     }
 
-    setup_multiplexing(&unconfigured)?;
+    setup_multiplexing(&unconfigured, config)?;
     Ok(true)
 }
 
 /// Set up SSH multiplexing for the given hosts (creates sockets dir and updates config).
-pub fn setup_multiplexing(hosts: &[&str]) -> io::Result<()> {
+///
+/// If `config` is provided, uses its `control_persist` value. Otherwise uses default (600s).
+pub fn setup_multiplexing(hosts: &[&str], config: Option<&SshConfig>) -> io::Result<()> {
     // Create sockets directory
     let Some(sockets_dir) = ssh_sockets_dir() else {
         return Err(io::Error::new(
@@ -380,6 +419,7 @@ pub fn setup_multiplexing(hosts: &[&str]) -> io::Result<()> {
 
     // Read existing config or start fresh
     let existing_config = fs::read_to_string(&config_path).unwrap_or_default();
+    let control_persist = config.map(|c| c.control_persist);
 
     let mut blocks_to_add = Vec::new();
     for host in hosts {
@@ -393,7 +433,7 @@ pub fn setup_multiplexing(hosts: &[&str]) -> io::Result<()> {
             );
             println!("  Please manually verify ControlMaster settings for this host.");
         } else {
-            blocks_to_add.push(multiplexing_config_block(host));
+            blocks_to_add.push(multiplexing_config_block(host, control_persist));
         }
     }
 
@@ -596,17 +636,24 @@ Host github.com gitlab.com
     }
 
     #[test]
-    fn test_multiplexing_config_block() {
-        let block = multiplexing_config_block("github.com");
+    fn test_multiplexing_config_block_default() {
+        let block = multiplexing_config_block("github.com", None);
         assert!(block.contains("Host github.com"));
         assert!(block.contains("ControlMaster auto"));
         assert!(block.contains("ControlPath"));
-        assert!(block.contains("ControlPersist"));
+        assert!(block.contains("ControlPersist 600"));
+    }
+
+    #[test]
+    fn test_multiplexing_config_block_custom_persist() {
+        let block = multiplexing_config_block("github.com", Some(300));
+        assert!(block.contains("Host github.com"));
+        assert!(block.contains("ControlPersist 300"));
     }
 
     #[test]
     fn test_multiplexing_config_block_custom_host() {
-        let block = multiplexing_config_block("gitlab.example.com");
+        let block = multiplexing_config_block("gitlab.example.com", None);
         assert!(block.contains("Host gitlab.example.com"));
         assert!(block.contains("ControlMaster auto"));
         assert!(!block.contains("github.com"));
