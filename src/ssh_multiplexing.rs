@@ -25,29 +25,105 @@ pub fn is_ssh_rate_limit_error(error_output: &str) -> bool {
         .any(|pattern| error_output.contains(pattern))
 }
 
+/// Validate that a hostname contains only valid characters.
+///
+/// Valid hostnames contain:
+/// - Alphanumeric characters (a-z, A-Z, 0-9)
+/// - Hyphens (but not at start/end of labels)
+/// - Dots (as label separators)
+/// - Underscores (technically invalid per RFC but common in internal hostnames)
+///
+/// Also accepts:
+/// - IPv4 addresses (e.g., 192.168.1.1)
+/// - IPv6 addresses in brackets (e.g., [::1], [2001:db8::1])
+fn is_valid_hostname(host: &str) -> bool {
+    if host.is_empty() {
+        return false;
+    }
+
+    // Handle bracketed IPv6 addresses
+    if host.starts_with('[') && host.ends_with(']') {
+        let inner = &host[1..host.len() - 1];
+        // Basic IPv6 validation: hex digits, colons, and optional dots for mapped IPv4
+        return !inner.is_empty()
+            && inner
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.');
+    }
+
+    // Reject hosts that are just dots or start/end with dots
+    if host == "." || host == ".." || host.starts_with('.') || host.ends_with('.') {
+        return false;
+    }
+
+    // Reject hosts with consecutive dots
+    if host.contains("..") {
+        return false;
+    }
+
+    // All characters must be alphanumeric, hyphen, underscore, or dot
+    host.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
 /// Extract the SSH hostname from a git remote URL.
 ///
 /// Supports:
 /// - SCP-like syntax: `git@HOST:path`
 /// - SSH URL: `ssh://HOST/path` or `ssh://user@HOST/path`
 ///
-/// Returns `None` for non-SSH URLs (https://, file://, etc.)
+/// Returns `None` for:
+/// - Non-SSH URLs (https://, file://, etc.)
+/// - Malformed URLs with invalid hostnames
+/// - URLs with embedded credentials (user:password@host)
 pub fn extract_ssh_host(url: &str) -> Option<String> {
+    let url = url.trim();
+
     if let Some(rest) = url.strip_prefix("ssh://") {
-        // ssh://[user@]host[:port]/path
+        // ssh://[user[:password]@]host[:port]/path
         let host_part = rest.split('/').next()?;
-        // Strip optional port
-        let host_no_port = host_part.split(':').next()?;
+
+        // Check for embedded password (user:password@host) - reject these
+        if let Some(at_pos) = host_part.rfind('@') {
+            let user_part = &host_part[..at_pos];
+            if user_part.contains(':') {
+                // Embedded password detected - reject for security
+                return None;
+            }
+        }
+
+        // Strip optional port (but be careful with IPv6 brackets)
+        let host_no_port = if host_part.contains('[') {
+            // IPv6 address: [::1]:port or [::1]
+            let bracket_end = host_part.find(']')?;
+            &host_part[..=bracket_end]
+        } else {
+            // Regular host:port
+            host_part.split(':').next()?
+        };
+
         let host = host_no_port.split('@').last()?;
-        if host.is_empty() {
+        if !is_valid_hostname(host) {
             return None;
         }
         Some(host.to_string())
     } else if url.contains('@') && url.contains(':') && !url.contains("://") {
         // git@host:path (SCP-like syntax)
-        let after_at = url.split('@').nth(1)?;
+        // Must have exactly one @ for valid SCP syntax
+        let parts: Vec<&str> = url.splitn(2, '@').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let after_at = parts[1];
+
+        // Check for embedded password in user part (user:password@host:path)
+        if parts[0].contains(':') {
+            return None;
+        }
+
         let host = after_at.split(':').next()?;
-        if host.is_empty() {
+        if !is_valid_hostname(host) {
             return None;
         }
         Some(host.to_string())
@@ -669,5 +745,158 @@ Host github.com gitlab.com
             "https://github.com/org/repo.git",
             "https://github.com/org/repo"
         ));
+    }
+
+    // ============ Hostname Validation Tests ============
+
+    #[test]
+    fn test_is_valid_hostname_standard() {
+        assert!(is_valid_hostname("github.com"));
+        assert!(is_valid_hostname("gitlab.example.com"));
+        assert!(is_valid_hostname("bitbucket.org"));
+        assert!(is_valid_hostname("localhost"));
+    }
+
+    #[test]
+    fn test_is_valid_hostname_with_hyphens() {
+        assert!(is_valid_hostname("my-server.example.com"));
+        assert!(is_valid_hostname("git-hub.com"));
+    }
+
+    #[test]
+    fn test_is_valid_hostname_with_underscores() {
+        // Underscores are technically invalid per RFC but common internally
+        assert!(is_valid_hostname("my_server.local"));
+        assert!(is_valid_hostname("git_host"));
+    }
+
+    #[test]
+    fn test_is_valid_hostname_ipv4() {
+        assert!(is_valid_hostname("192.168.1.1"));
+        assert!(is_valid_hostname("10.0.0.1"));
+        assert!(is_valid_hostname("127.0.0.1"));
+    }
+
+    #[test]
+    fn test_is_valid_hostname_ipv6_bracketed() {
+        assert!(is_valid_hostname("[::1]"));
+        assert!(is_valid_hostname("[2001:db8::1]"));
+        assert!(is_valid_hostname("[fe80::1]"));
+        // IPv4-mapped IPv6
+        assert!(is_valid_hostname("[::ffff:192.168.1.1]"));
+    }
+
+    #[test]
+    fn test_is_valid_hostname_invalid() {
+        assert!(!is_valid_hostname(""));
+        assert!(!is_valid_hostname("."));
+        assert!(!is_valid_hostname(".."));
+        assert!(!is_valid_hostname(".example.com"));
+        assert!(!is_valid_hostname("example.com."));
+        assert!(!is_valid_hostname("example..com"));
+        // Invalid characters
+        assert!(!is_valid_hostname("host name"));
+        assert!(!is_valid_hostname("host/path"));
+        assert!(!is_valid_hostname("host:port"));
+    }
+
+    // ============ Edge Case URL Parsing Tests ============
+
+    #[test]
+    fn test_extract_ssh_host_rejects_embedded_password_scp() {
+        // SCP-like syntax with password should be rejected
+        assert_eq!(extract_ssh_host("user:password@github.com:org/repo.git"), None);
+    }
+
+    #[test]
+    fn test_extract_ssh_host_rejects_embedded_password_ssh_url() {
+        // SSH URL with embedded password should be rejected
+        assert_eq!(
+            extract_ssh_host("ssh://user:password@github.com/org/repo.git"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_handles_whitespace() {
+        assert_eq!(
+            extract_ssh_host("  git@github.com:org/repo.git  "),
+            Some("github.com".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("\tssh://git@github.com/org/repo.git\n"),
+            Some("github.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_rejects_empty_host() {
+        assert_eq!(extract_ssh_host("git@:path"), None);
+        assert_eq!(extract_ssh_host("ssh:///path"), None);
+        assert_eq!(extract_ssh_host("ssh://user@/path"), None);
+    }
+
+    #[test]
+    fn test_extract_ssh_host_rejects_invalid_hostname() {
+        assert_eq!(extract_ssh_host("git@..:path"), None);
+        assert_eq!(extract_ssh_host("git@host/with/slash:path"), None);
+        assert_eq!(extract_ssh_host("ssh://host with space/path"), None);
+    }
+
+    #[test]
+    fn test_extract_ssh_host_ipv6_ssh_url() {
+        assert_eq!(
+            extract_ssh_host("ssh://git@[::1]/repo.git"),
+            Some("[::1]".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("ssh://[2001:db8::1]/repo.git"),
+            Some("[2001:db8::1]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_ipv6_with_port() {
+        assert_eq!(
+            extract_ssh_host("ssh://git@[::1]:2222/repo.git"),
+            Some("[::1]".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_internal_hostnames() {
+        // Internal hostnames are valid
+        assert_eq!(
+            extract_ssh_host("git@gitlab.internal:org/repo.git"),
+            Some("gitlab.internal".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("git@git-server:repo.git"),
+            Some("git-server".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_localhost() {
+        assert_eq!(
+            extract_ssh_host("git@localhost:repo.git"),
+            Some("localhost".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("ssh://localhost/repo.git"),
+            Some("localhost".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_ssh_host_numeric_ip() {
+        assert_eq!(
+            extract_ssh_host("git@192.168.1.100:repo.git"),
+            Some("192.168.1.100".to_string())
+        );
+        assert_eq!(
+            extract_ssh_host("ssh://10.0.0.1/repo.git"),
+            Some("10.0.0.1".to_string())
+        );
     }
 }
