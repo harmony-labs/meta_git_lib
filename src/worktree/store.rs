@@ -380,6 +380,10 @@ mod tests {
         use std::thread;
 
         let temp_dir = Arc::new(tempfile::tempdir().unwrap());
+        // Isolate store to temp dir to avoid conflicts with parallel nextest processes
+        let store_dir = temp_dir.path().join("meta-store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("META_DATA_DIR", &store_dir);
 
         // Spawn multiple threads that add worktrees concurrently
         let handles: Vec<_> = (0..5)
@@ -423,6 +427,7 @@ mod tests {
                 key
             );
         }
+        std::env::remove_var("META_DATA_DIR");
     }
 
     #[test]
@@ -432,6 +437,10 @@ mod tests {
         use std::thread;
 
         let temp_dir = Arc::new(tempfile::tempdir().unwrap());
+        // Isolate store to temp dir to avoid conflicts with parallel nextest processes
+        let store_dir = temp_dir.path().join("meta-store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("META_DATA_DIR", &store_dir);
 
         // Add 10 worktrees
         let paths: Vec<_> = (0..10)
@@ -474,11 +483,18 @@ mod tests {
         for key in &keys_before {
             assert!(!data.worktrees.contains_key(key), "Key {} should be removed", key);
         }
+        std::env::remove_var("META_DATA_DIR");
     }
 
     #[test]
     #[serial_test::serial]
     fn store_handles_corrupted_data_file() {
+        // Isolate store to temp dir to avoid conflicts with parallel nextest processes
+        let temp_dir = tempfile::tempdir().unwrap();
+        let store_dir = temp_dir.path().join("meta-store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("META_DATA_DIR", &store_dir);
+
         let store = store_path();
 
         // Clean up by ensuring a fresh empty store
@@ -504,7 +520,7 @@ mod tests {
             }
         }
 
-        // Clean up by restoring a valid empty store (don't just remove the file)
-        std::fs::write(&store, b"{\"worktrees\":{}}").unwrap();
+        std::env::remove_var("META_DATA_DIR");
+        // temp_dir cleanup is automatic on drop
     }
 }
