@@ -254,13 +254,18 @@ mod tests {
     }
 
     // ── Concurrent store access (file locking) ─────────────
-    // Note: These tests use #[serial] because they access the shared global store at ~/.meta/worktree.json
-    // Running them in parallel would cause flaky failures due to shared state.
+    // Note: These tests use #[serial] because META_DATA_DIR is process-global.
+    // Each test isolates its store via a unique temp directory.
 
     #[test]
     #[serial_test::serial]
     fn store_add_and_remove_sequential() {
         let temp_dir = tempfile::tempdir().unwrap();
+        // Isolate store to temp dir
+        let store_dir = temp_dir.path().join("meta-store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("META_DATA_DIR", &store_dir);
+
         let wt_path = temp_dir.path().join("test-wt");
         std::fs::create_dir(&wt_path).unwrap();
 
@@ -279,12 +284,19 @@ mod tests {
         // Verify it was removed
         let data = store_list().unwrap();
         assert!(!data.worktrees.contains_key(&key));
+
+        std::env::remove_var("META_DATA_DIR");
     }
 
     #[test]
     #[serial_test::serial]
     fn store_remove_batch_removes_multiple() {
         let temp_dir = tempfile::tempdir().unwrap();
+        // Isolate store to temp dir
+        let store_dir = temp_dir.path().join("meta-store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("META_DATA_DIR", &store_dir);
+
         let wt1 = temp_dir.path().join("wt1");
         let wt2 = temp_dir.path().join("wt2");
         let wt3 = temp_dir.path().join("wt3");
@@ -310,17 +322,18 @@ mod tests {
 
         // Cleanup
         store_remove(&wt3).unwrap();
+        std::env::remove_var("META_DATA_DIR");
     }
 
     #[test]
     #[serial_test::serial]
     fn store_extend_repos_adds_to_existing_entry() {
-        // Ensure clean store
-        let store = store_path();
-        meta_core::data_dir::ensure_meta_dir().unwrap();
-        std::fs::write(&store, b"{\"worktrees\":{}}").unwrap();
-
         let temp_dir = tempfile::tempdir().unwrap();
+        // Isolate store to temp dir
+        let store_dir = temp_dir.path().join("meta-store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("META_DATA_DIR", &store_dir);
+
         let wt_path = temp_dir.path().join("extend-wt");
         std::fs::create_dir(&wt_path).unwrap();
 
@@ -354,23 +367,27 @@ mod tests {
 
         // Cleanup
         store_remove(&wt_path).unwrap();
+        std::env::remove_var("META_DATA_DIR");
     }
 
     #[test]
     #[serial_test::serial]
     fn store_operations_handle_nonexistent_store_gracefully() {
-        // Ensure store doesn't exist
-        let store = store_path();
-        let _ = std::fs::remove_file(&store);
+        let temp_dir = tempfile::tempdir().unwrap();
+        // Isolate store to temp dir - but don't create worktree.json
+        let store_dir = temp_dir.path().join("meta-store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+        std::env::set_var("META_DATA_DIR", &store_dir);
 
-        // List should return empty, not error
+        // List should return empty, not error (store file doesn't exist yet)
         let data = store_list().unwrap();
         assert!(data.worktrees.is_empty());
 
-        // Remove on non-existent store should succeed
-        let temp_dir = tempfile::tempdir().unwrap();
+        // Remove on non-existent worktree should succeed
         let wt_path = temp_dir.path().join("nonexistent-wt");
         assert!(store_remove(&wt_path).is_ok());
+
+        std::env::remove_var("META_DATA_DIR");
     }
 
     #[test]
