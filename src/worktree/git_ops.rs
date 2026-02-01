@@ -452,7 +452,7 @@ mod tests {
     #[test]
     fn removal_ordering_children_before_root() {
         // Verify via the filter logic that children come before "."
-        let repos = vec![
+        let repos = [
             meta_cli::worktree::WorktreeRepoInfo {
                 alias: ".".to_string(),
                 branch: "main".to_string(),
