@@ -75,7 +75,9 @@ pub fn capture_repo_state(repo_path: &Path) -> Result<RepoState> {
         );
     }
 
-    let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+    let sha = String::from_utf8_lossy(&sha_output.stdout)
+        .trim()
+        .to_string();
 
     let branch = git_utils::current_branch(repo_path);
 
@@ -90,7 +92,11 @@ pub fn capture_repo_state(repo_path: &Path) -> Result<RepoState> {
 }
 
 /// Restore a repository to a snapshot state
-pub fn restore_repo_state(repo_path: &Path, state: &RepoState, force: bool) -> Result<RestoreResult> {
+pub fn restore_repo_state(
+    repo_path: &Path,
+    state: &RepoState,
+    force: bool,
+) -> Result<RestoreResult> {
     let repo_name = repo_path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -156,7 +162,7 @@ pub fn restore_repo_state(repo_path: &Path, state: &RepoState, force: bool) -> R
             repo: repo_name,
             success: false,
             stashed,
-            message: format!("Failed to checkout: {}", stderr),
+            message: format!("Failed to checkout: {stderr}"),
         });
     }
 
@@ -215,10 +221,10 @@ pub fn save_snapshot(meta_root: &Path, snapshot: &Snapshot) -> Result<()> {
 
 /// Load a snapshot from disk
 pub fn load_snapshot(meta_root: &Path, name: &str) -> Result<Snapshot> {
-    let snapshot_path = meta_root.join(SNAPSHOTS_DIR).join(format!("{}.json", name));
+    let snapshot_path = meta_root.join(SNAPSHOTS_DIR).join(format!("{name}.json"));
 
     if !snapshot_path.exists() {
-        anyhow::bail!("Snapshot '{}' not found", name);
+        anyhow::bail!("Snapshot '{name}' not found");
     }
 
     let json = fs::read_to_string(&snapshot_path).context("Failed to read snapshot file")?;
@@ -264,10 +270,10 @@ pub fn list_snapshots(meta_root: &Path) -> Result<Vec<SnapshotInfo>> {
 
 /// Delete a snapshot
 pub fn delete_snapshot(meta_root: &Path, name: &str) -> Result<()> {
-    let snapshot_path = meta_root.join(SNAPSHOTS_DIR).join(format!("{}.json", name));
+    let snapshot_path = meta_root.join(SNAPSHOTS_DIR).join(format!("{name}.json"));
 
     if !snapshot_path.exists() {
-        anyhow::bail!("Snapshot '{}' not found", name);
+        anyhow::bail!("Snapshot '{name}' not found");
     }
 
     fs::remove_file(&snapshot_path).context("Failed to delete snapshot file")?;

@@ -156,7 +156,10 @@ mod tests {
         let canonical = temp_path.canonicalize().unwrap();
 
         // store_key should return the canonical path
-        assert_eq!(store_key(temp_path), canonical.to_string_lossy().to_string());
+        assert_eq!(
+            store_key(temp_path),
+            canonical.to_string_lossy().to_string()
+        );
     }
 
     #[test]
@@ -407,10 +410,10 @@ mod tests {
             .map(|i| {
                 let temp_dir = Arc::clone(&temp_dir);
                 thread::spawn(move || {
-                    let wt_path = temp_dir.path().join(format!("concurrent-add-{}", i));
+                    let wt_path = temp_dir.path().join(format!("concurrent-add-{i}"));
                     std::fs::create_dir(&wt_path).unwrap();
                     let mut entry = make_entry("2025-01-01T00:00:00Z", None);
-                    entry.name = format!("concurrent-add-{}", i);
+                    entry.name = format!("concurrent-add-{i}");
                     store_add(&wt_path, entry).unwrap();
                     wt_path
                 })
@@ -426,8 +429,7 @@ mod tests {
             let key = store_key(path);
             assert!(
                 data.worktrees.contains_key(&key),
-                "Concurrent add failed: {} not found in store",
-                key
+                "Concurrent add failed: {key} not found in store"
             );
         }
 
@@ -440,8 +442,7 @@ mod tests {
         for key in &keys {
             assert!(
                 !data_after.worktrees.contains_key(key),
-                "Cleanup failed: {} still in store",
-                key
+                "Cleanup failed: {key} still in store"
             );
         }
         std::env::remove_var("META_DATA_DIR");
@@ -462,10 +463,10 @@ mod tests {
         // Add 10 worktrees
         let paths: Vec<_> = (0..10)
             .map(|i| {
-                let wt_path = temp_dir.path().join(format!("batch-rm-{}", i));
+                let wt_path = temp_dir.path().join(format!("batch-rm-{i}"));
                 std::fs::create_dir(&wt_path).unwrap();
                 let mut entry = make_entry("2025-01-01T00:00:00Z", None);
-                entry.name = format!("batch-rm-{}", i);
+                entry.name = format!("batch-rm-{i}");
                 store_add(&wt_path, entry).unwrap();
                 wt_path
             })
@@ -481,10 +482,8 @@ mod tests {
                     // Each thread removes a different subset
                     let start = batch_id * 3;
                     let end = std::cmp::min(start + 4, paths.len());
-                    let keys: Vec<String> = paths[start..end]
-                        .iter()
-                        .map(|p| store_key(p))
-                        .collect();
+                    let keys: Vec<String> =
+                        paths[start..end].iter().map(|p| store_key(p)).collect();
                     store_remove_batch(&keys).unwrap();
                 })
             })
@@ -498,7 +497,10 @@ mod tests {
         // All entries should be removed (with possible duplicates in batches)
         let data = store_list().unwrap();
         for key in &keys_before {
-            assert!(!data.worktrees.contains_key(key), "Key {} should be removed", key);
+            assert!(
+                !data.worktrees.contains_key(key),
+                "Key {key} should be removed"
+            );
         }
         std::env::remove_var("META_DATA_DIR");
     }
@@ -530,7 +532,10 @@ mod tests {
         match result {
             Ok(data) => {
                 // If it returns a default, it should be empty
-                assert!(data.worktrees.is_empty(), "Corrupted store should return empty data");
+                assert!(
+                    data.worktrees.is_empty(),
+                    "Corrupted store should return empty data"
+                );
             }
             Err(_) => {
                 // Error is also acceptable

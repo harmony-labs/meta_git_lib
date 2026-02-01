@@ -91,7 +91,13 @@ pub fn git_worktree_add(
     } else if remote_branch_exists {
         // Create local tracking branch from remote
         vec![
-            "worktree", "add", "--track", "-b", branch, &dest_str, &remote_ref,
+            "worktree",
+            "add",
+            "--track",
+            "-b",
+            branch,
+            &dest_str,
+            &remote_ref,
         ]
     } else {
         // Create new branch from HEAD

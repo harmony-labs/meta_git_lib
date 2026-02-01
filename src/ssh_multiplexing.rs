@@ -125,7 +125,7 @@ pub fn extract_ssh_host(url: &str) -> Option<String> {
             host_part.split(':').next()?
         };
 
-        let host = host_no_port.split('@').last()?;
+        let host = host_no_port.split('@').next_back()?;
         if !is_valid_hostname(host) {
             return None;
         }
@@ -181,7 +181,10 @@ pub fn normalize_git_url(url: &str) -> String {
             // Strip optional port
             let host_no_port = if let Some(colon_pos) = host_part.rfind(':') {
                 // Only strip if after @ (it's a port, not user separator)
-                if host_part[colon_pos + 1..].chars().all(|c| c.is_ascii_digit()) {
+                if host_part[colon_pos + 1..]
+                    .chars()
+                    .all(|c| c.is_ascii_digit())
+                {
                     &host_part[..colon_pos]
                 } else {
                     host_part
@@ -274,8 +277,7 @@ fn is_host_configured(content: &str, host: &str) -> bool {
             in_matching_block = false;
             in_wildcard_block = false;
 
-            if trimmed.starts_with("Host ") {
-                let hosts_on_line = &trimmed["Host ".len()..];
+            if let Some(hosts_on_line) = trimmed.strip_prefix("Host ") {
                 // Host lines can have multiple patterns: "Host github.com gitlab.com"
                 for pattern in hosts_on_line.split_whitespace() {
                     if pattern == host {
@@ -354,10 +356,7 @@ pub fn prompt_and_setup_multiplexing(
     } else {
         unconfigured.join(", ")
     };
-    println!(
-        "Hosts to configure: {}",
-        style(&host_display).yellow()
-    );
+    println!("Hosts to configure: {}", style(&host_display).yellow());
     println!();
     println!(
         "This will add the following to {}:",
@@ -425,7 +424,10 @@ pub fn setup_multiplexing(hosts: &[&str], config: Option<&SshConfig>) -> io::Res
     for host in hosts {
         // Check if Host block already exists for this host
         let host_pattern = format!("Host {host}");
-        if existing_config.lines().any(|line| line.trim() == host_pattern) {
+        if existing_config
+            .lines()
+            .any(|line| line.trim() == host_pattern)
+        {
             println!(
                 "{} Found existing '{}' in SSH config.",
                 style("!").yellow(),
@@ -445,11 +447,7 @@ pub fn setup_multiplexing(hosts: &[&str], config: Option<&SshConfig>) -> io::Res
     let new_config = if existing_config.is_empty() {
         blocks_to_add.join("")
     } else {
-        format!(
-            "{}\n{}",
-            existing_config.trim_end(),
-            blocks_to_add.join("")
-        )
+        format!("{}\n{}", existing_config.trim_end(), blocks_to_add.join(""))
     };
 
     fs::write(&config_path, new_config)?;
@@ -539,14 +537,8 @@ mod tests {
 
     #[test]
     fn test_extract_ssh_host_non_ssh() {
-        assert_eq!(
-            extract_ssh_host("https://github.com/org/repo.git"),
-            None
-        );
-        assert_eq!(
-            extract_ssh_host("http://github.com/org/repo.git"),
-            None
-        );
+        assert_eq!(extract_ssh_host("https://github.com/org/repo.git"), None);
+        assert_eq!(extract_ssh_host("http://github.com/org/repo.git"), None);
         assert_eq!(extract_ssh_host("file:///path/to/repo"), None);
         assert_eq!(extract_ssh_host("/local/path/to/repo"), None);
         assert_eq!(extract_ssh_host(""), None);
@@ -852,7 +844,10 @@ Host github.com gitlab.com
     #[test]
     fn test_extract_ssh_host_rejects_embedded_password_scp() {
         // SCP-like syntax with password should be rejected
-        assert_eq!(extract_ssh_host("user:password@github.com:org/repo.git"), None);
+        assert_eq!(
+            extract_ssh_host("user:password@github.com:org/repo.git"),
+            None
+        );
     }
 
     #[test]

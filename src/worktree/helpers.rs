@@ -84,8 +84,7 @@ pub fn find_meta_dir() -> Option<PathBuf> {
 
 /// Like `find_meta_dir()` but returns an error if not found.
 pub fn require_meta_dir() -> Result<PathBuf> {
-    find_meta_dir()
-        .ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta found)"))
+    find_meta_dir().ok_or_else(|| anyhow::anyhow!("Not inside a meta project (no .meta found)"))
 }
 
 /// Resolve worktree context for a named worktree.
@@ -331,9 +330,10 @@ pub fn ensure_worktrees_in_gitignore(
 
     if gitignore_path.exists() {
         let content = std::fs::read_to_string(&gitignore_path)?;
-        if content.lines().any(|line| {
-            line.trim() == pattern.trim_end_matches('/') || line.trim() == pattern
-        }) {
+        if content
+            .lines()
+            .any(|line| line.trim() == pattern.trim_end_matches('/') || line.trim() == pattern)
+        {
             return Ok(()); // already present
         }
         // Append
