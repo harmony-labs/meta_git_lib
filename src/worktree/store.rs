@@ -163,6 +163,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn store_key_resolves_symlinks() {
         use std::os::unix::fs::symlink;
 
