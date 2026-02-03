@@ -43,11 +43,11 @@ pub fn resolve_worktree_root(meta_dir: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// Read and parse the .meta config as a JSON Value.
-/// Tries .meta, .meta.yaml, .meta.yml in order, parsing JSON or YAML as appropriate.
+/// Tries .meta, .meta.json, .meta.yaml, .meta.yml in order, parsing JSON or YAML as appropriate.
 pub fn read_meta_config_value(meta_dir: &Path) -> Option<serde_json::Value> {
-    for name in &[".meta", ".meta.yaml", ".meta.yml"] {
+    for name in &[".meta", ".meta.json", ".meta.yaml", ".meta.yml"] {
         let path = meta_dir.join(name);
-        if !path.exists() {
+        if !path.exists() || !path.is_file() {
             continue;
         }
         let content = match std::fs::read_to_string(&path) {
