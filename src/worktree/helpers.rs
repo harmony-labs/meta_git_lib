@@ -204,7 +204,11 @@ pub fn lookup_nested_project(
             anyhow::anyhow!(
                 "Unknown nested repo: '{}'. Valid nested paths:\n  {}",
                 alias,
-                valid_paths.into_iter().cloned().collect::<Vec<_>>().join("\n  ")
+                valid_paths
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n  ")
             )
         })
     } else {
