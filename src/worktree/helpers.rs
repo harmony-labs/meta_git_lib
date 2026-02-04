@@ -154,7 +154,7 @@ pub fn load_projects_with_root(
             meta_cli::config::ProjectInfo {
                 name: ".".to_string(),
                 path: ".".to_string(),
-                repo: String::new(), // Root repo doesn't have a remote URL in this context
+                repo: None, // Root repo doesn't have a remote URL in this context
                 tags: vec![],
                 provides: vec![],
                 depends_on: vec![],
@@ -178,6 +178,41 @@ pub fn lookup_project<'a>(
             valid.join(", ")
         )
     })
+}
+
+/// Look up a project by alias, supporting nested paths like "vendor/tree-sitter-markdown".
+///
+/// For simple aliases (no `/`), uses flat lookup from the current .meta.
+/// For nested paths, walks the meta tree recursively to find the project.
+///
+/// Returns the resolved path and project info.
+pub fn lookup_nested_project(
+    meta_dir: &Path,
+    alias: &str,
+) -> Result<(PathBuf, meta_cli::config::ProjectInfo)> {
+    // If alias contains '/', use recursive lookup
+    if alias.contains('/') {
+        let tree = meta_cli::config::walk_meta_tree(meta_dir, None)?;
+
+        // Build a map of full path -> ProjectInfo
+        let project_map = meta_cli::config::build_project_map(&tree, meta_dir, "");
+
+        project_map.get(alias).cloned().ok_or_else(|| {
+            // Use keys from the map we already built (avoids re-walking the tree)
+            let mut valid_paths: Vec<_> = project_map.keys().collect();
+            valid_paths.sort();
+            anyhow::anyhow!(
+                "Unknown nested repo: '{}'. Valid nested paths:\n  {}",
+                alias,
+                valid_paths.into_iter().cloned().collect::<Vec<_>>().join("\n  ")
+            )
+        })
+    } else {
+        // Existing flat lookup for simple aliases
+        let projects = load_projects(meta_dir)?;
+        let project = lookup_project(&projects, alias)?;
+        Ok((meta_dir.join(&project.path), project.clone()))
+    }
 }
 
 pub fn resolve_branch(
@@ -567,5 +602,180 @@ mod tests {
         let content = std::fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
         // Should appear exactly once
         assert_eq!(content.matches(".worktrees/").count(), 1);
+    }
+
+    // ── lookup_nested_project ───────────────────────────────
+
+    #[test]
+    fn lookup_nested_simple_alias_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"backend": "git@github.com:org/backend.git"}}"#,
+        )
+        .unwrap();
+        std::fs::create_dir(tmp.path().join("backend")).unwrap();
+
+        let (path, info) = lookup_nested_project(tmp.path(), "backend").unwrap();
+        assert_eq!(info.name, "backend");
+        assert_eq!(path, tmp.path().join("backend"));
+    }
+
+    #[test]
+    fn lookup_nested_nested_path_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vendor = tmp.path().join("vendor");
+        let nested = vendor.join("nested-lib");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        // Root .meta - vendor is a nested meta repo (has repo URL + meta: true)
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Nested .meta inside vendor (simulates what exists after cloning vendor)
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {"nested-lib": "git@github.com:org/nested-lib.git"}}"#,
+        )
+        .unwrap();
+
+        let (path, info) = lookup_nested_project(tmp.path(), "vendor/nested-lib").unwrap();
+        assert_eq!(info.name, "nested-lib");
+        assert_eq!(path, tmp.path().join("vendor/nested-lib"));
+    }
+
+    #[test]
+    fn lookup_nested_invalid_nested_path_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("vendor")).unwrap();
+
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        let result = lookup_nested_project(tmp.path(), "vendor/nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown nested repo"));
+        assert!(err.contains("vendor/nonexistent"));
+    }
+
+    #[test]
+    fn lookup_nested_unknown_simple_alias_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"backend": "git@github.com:org/backend.git"}}"#,
+        )
+        .unwrap();
+
+        let result = lookup_nested_project(tmp.path(), "nonexistent");
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Unknown repo alias"));
+    }
+
+    // ── build_project_map (via meta_cli::config) ──────────────
+
+    #[test]
+    fn build_project_map_handles_nested_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vendor = tmp.path().join("vendor");
+        let nested = vendor.join("lib");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {"lib": "git@github.com:org/lib.git"}}"#,
+        )
+        .unwrap();
+
+        let tree = meta_cli::config::walk_meta_tree(tmp.path(), None).unwrap();
+        let map = meta_cli::config::build_project_map(&tree, tmp.path(), "");
+
+        // Should contain both vendor and vendor/lib
+        assert!(map.contains_key("vendor"));
+        assert!(map.contains_key("vendor/lib"));
+
+        let (vendor_path, vendor_info) = map.get("vendor").unwrap();
+        assert_eq!(vendor_info.name, "vendor");
+        assert_eq!(*vendor_path, tmp.path().join("vendor"));
+
+        let (lib_path, lib_info) = map.get("vendor/lib").unwrap();
+        assert_eq!(lib_info.name, "lib");
+        assert_eq!(*lib_path, tmp.path().join("vendor/lib"));
+    }
+
+    #[test]
+    fn lookup_nested_with_custom_path_in_nested_repo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vendor = tmp.path().join("vendor");
+        let custom_path = vendor.join("packages/mylib");
+        std::fs::create_dir_all(&custom_path).unwrap();
+
+        // Root .meta - vendor is a nested meta repo
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Nested .meta with custom path
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {"mylib": {"repo": "git@github.com:org/mylib.git", "path": "packages/mylib"}}}"#,
+        )
+        .unwrap();
+
+        // Lookup by the full path (vendor/packages/mylib)
+        let (path, info) = lookup_nested_project(tmp.path(), "vendor/packages/mylib").unwrap();
+        assert_eq!(info.name, "mylib");
+        assert_eq!(path, tmp.path().join("vendor/packages/mylib"));
+    }
+
+    #[test]
+    fn lookup_nested_with_deeply_nested_meta_repos() {
+        // Test 3 levels: root -> vendor -> sub-vendor -> deep-lib
+        let tmp = tempfile::tempdir().unwrap();
+        let vendor = tmp.path().join("vendor");
+        let sub_vendor = vendor.join("sub-vendor");
+        let deep_lib = sub_vendor.join("deep-lib");
+        std::fs::create_dir_all(&deep_lib).unwrap();
+
+        // Root tracks vendor
+        std::fs::write(
+            tmp.path().join(".meta"),
+            r#"{"projects": {"vendor": {"repo": "git@github.com:org/vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Vendor tracks sub-vendor
+        std::fs::write(
+            vendor.join(".meta"),
+            r#"{"projects": {"sub-vendor": {"repo": "git@github.com:org/sub-vendor.git", "meta": true}}}"#,
+        )
+        .unwrap();
+
+        // Sub-vendor tracks deep-lib
+        std::fs::write(
+            sub_vendor.join(".meta"),
+            r#"{"projects": {"deep-lib": "git@github.com:org/deep-lib.git"}}"#,
+        )
+        .unwrap();
+
+        // Lookup the deeply nested project
+        let (path, info) = lookup_nested_project(tmp.path(), "vendor/sub-vendor/deep-lib").unwrap();
+        assert_eq!(info.name, "deep-lib");
+        assert_eq!(path, tmp.path().join("vendor/sub-vendor/deep-lib"));
     }
 }
