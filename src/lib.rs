@@ -10,8 +10,8 @@ use console::style;
 pub use missing::print_missing_repo;
 pub use ssh_multiplexing::{
     extract_ssh_host, get_remote_url, is_multiplexing_configured, is_ssh_rate_limit_error,
-    normalize_git_url, print_multiplexing_hint, prompt_and_setup_multiplexing, setup_multiplexing,
-    urls_match, SshConfig, DEFAULT_CONTROL_PERSIST,
+    normalize_git_url, print_multiplexing_hint, prompt_and_setup_multiplexing, read_line_from_tty,
+    setup_multiplexing, urls_match, SshConfig, DEFAULT_CONTROL_PERSIST,
 };
 
 /// Clone a git repository into the target directory, with progress bar.

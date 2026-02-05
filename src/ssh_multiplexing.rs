@@ -7,7 +7,7 @@
 use console::style;
 use serde::Deserialize;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 /// Default ControlPersist duration in seconds (10 minutes)
@@ -46,6 +46,32 @@ pub fn is_ssh_rate_limit_error(error_output: &str) -> bool {
     SSH_ERROR_PATTERNS
         .iter()
         .any(|pattern| error_output.contains(pattern))
+}
+
+/// Read a line from the TTY directly, bypassing stdin.
+///
+/// This is necessary when running as a subprocess where stdin is
+/// connected to a pipe (e.g., JSON-RPC communication) rather than
+/// the user's terminal.
+///
+/// Uses `/dev/tty` on Unix and `CONIN$` on Windows.
+pub fn read_line_from_tty() -> io::Result<String> {
+    #[cfg(unix)]
+    {
+        let tty = fs::File::open("/dev/tty")?;
+        let mut reader = io::BufReader::new(tty);
+        let mut input = String::new();
+        reader.read_line(&mut input)?;
+        Ok(input)
+    }
+    #[cfg(windows)]
+    {
+        let tty = fs::File::open("CONIN$")?;
+        let mut reader = io::BufReader::new(tty);
+        let mut input = String::new();
+        reader.read_line(&mut input)?;
+        Ok(input)
+    }
 }
 
 /// Validate that a hostname contains only valid characters.
@@ -372,8 +398,7 @@ pub fn prompt_and_setup_multiplexing(
     print!("Would you like to set this up now? [y/N]: ");
     io::stdout().flush()?;
 
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    let input = read_line_from_tty()?;
 
     if input.trim().to_lowercase() != "y" {
         println!("Setup cancelled. You can set this up manually later.");
