@@ -87,10 +87,7 @@ impl CloneQueue {
         }
 
         let Some((meta_path, _format)) = config::find_meta_config_in(base_dir) else {
-            debug!(
-                "No .meta config found in {}",
-                base_dir.display()
-            );
+            debug!("No .meta config found in {}", base_dir.display());
             return Ok(0);
         };
 
