@@ -59,7 +59,7 @@ pub fn read_meta_config_value(meta_dir: &Path) -> Option<serde_json::Value> {
             return Some(v);
         }
         // Try YAML
-        if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+        if let Ok(v) = serde_yml::from_str::<serde_yml::Value>(&content) {
             // Convert YAML Value to JSON Value for uniform access
             if let Ok(json_val) = serde_json::to_value(v) {
                 return Some(json_val);

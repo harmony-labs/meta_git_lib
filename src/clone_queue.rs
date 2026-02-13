@@ -1,4 +1,4 @@
-use log::debug;
+use log::{debug, warn};
 use meta_core::config;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -55,24 +55,20 @@ impl CloneQueue {
     pub fn push(&self, task: CloneTask) -> bool {
         let path = task.target_path.clone();
 
-        // Check if already completed
-        {
-            let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
-            if completed.contains(&path) {
-                return false;
-            }
+        // Lock both completed and pending atomically to prevent TOCTOU races
+        let completed = self.completed.lock().unwrap_or_else(|e| e.into_inner());
+        if completed.contains(&path) {
+            return false;
         }
 
-        // Add to pending
-        {
-            let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            // Check if already in pending
-            if pending.iter().any(|t| t.target_path == path) {
-                return false;
-            }
-            pending.push(task);
-            self.total_discovered.fetch_add(1, Ordering::SeqCst);
+        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        if pending.iter().any(|t| t.target_path == path) {
+            return false;
         }
+        pending.push(task);
+        drop(pending);
+        drop(completed);
+        self.total_discovered.fetch_add(1, Ordering::SeqCst);
 
         true
     }
@@ -196,8 +192,8 @@ impl CloneQueue {
 
         // Warn if the config declared meta: true but no nested .meta was found
         if task.is_meta && added == 0 {
-            eprintln!(
-                "warning: '{}' is declared with `meta: true` but no .meta config was found inside it",
+            warn!(
+                "'{}' is declared with `meta: true` but no .meta config was found inside it",
                 task.name
             );
         }
