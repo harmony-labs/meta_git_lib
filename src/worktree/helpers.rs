@@ -59,7 +59,7 @@ pub fn read_meta_config_value(meta_dir: &Path) -> Option<serde_json::Value> {
             return Some(v);
         }
         // Try YAML
-        if let Ok(v) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+        if let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&content) {
             // Convert YAML Value to JSON Value for uniform access
             if let Ok(json_val) = serde_json::to_value(v) {
                 return Some(json_val);
@@ -78,7 +78,7 @@ pub fn read_worktrees_dir_from_config(meta_dir: &Path) -> Option<String> {
 
 pub fn find_meta_dir() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    meta_cli::config::find_meta_config(&cwd, None)
+    meta_core::config::find_meta_config(&cwd, None)
         .map(|(path, _)| path.parent().unwrap_or(Path::new(".")).to_path_buf())
 }
 
@@ -124,10 +124,10 @@ pub fn discover_and_validate_worktree(
 }
 
 /// Load and parse the .meta config, returning the project list.
-pub fn load_projects(meta_dir: &Path) -> Result<Vec<meta_cli::config::ProjectInfo>> {
-    let (config_path, _) = meta_cli::config::find_meta_config(meta_dir, None)
+pub fn load_projects(meta_dir: &Path) -> Result<Vec<meta_core::config::ProjectInfo>> {
+    let (config_path, _) = meta_core::config::find_meta_config(meta_dir, None)
         .ok_or_else(|| anyhow::anyhow!("No .meta config found in {}", meta_dir.display()))?;
-    let (projects, _) = meta_cli::config::parse_meta_config(&config_path)?;
+    let (projects, _) = meta_core::config::parse_meta_config(&config_path)?;
     Ok(projects)
 }
 
@@ -144,20 +144,21 @@ pub fn load_projects(meta_dir: &Path) -> Result<Vec<meta_cli::config::ProjectInf
 pub fn load_projects_with_root(
     meta_dir: &Path,
     include_root: bool,
-) -> Result<Vec<meta_cli::config::ProjectInfo>> {
+) -> Result<Vec<meta_core::config::ProjectInfo>> {
     let mut projects = load_projects(meta_dir)?;
 
     if include_root && meta_dir.join(".git").exists() {
         // Prepend root repo so it's processed first (dependencies come first)
         projects.insert(
             0,
-            meta_cli::config::ProjectInfo {
+            meta_core::config::ProjectInfo {
                 name: ".".to_string(),
                 path: ".".to_string(),
                 repo: None, // Root repo doesn't have a remote URL in this context
                 tags: vec![],
                 provides: vec![],
                 depends_on: vec![],
+                meta: false,
             },
         );
     }
@@ -167,9 +168,9 @@ pub fn load_projects_with_root(
 
 /// Look up a project by alias, returning an error with valid aliases on miss.
 pub fn lookup_project<'a>(
-    projects: &'a [meta_cli::config::ProjectInfo],
+    projects: &'a [meta_core::config::ProjectInfo],
     alias: &str,
-) -> Result<&'a meta_cli::config::ProjectInfo> {
+) -> Result<&'a meta_core::config::ProjectInfo> {
     projects.iter().find(|p| p.name == alias).ok_or_else(|| {
         let valid: Vec<&str> = projects.iter().map(|p| p.name.as_str()).collect();
         anyhow::anyhow!(
@@ -189,13 +190,13 @@ pub fn lookup_project<'a>(
 pub fn lookup_nested_project(
     meta_dir: &Path,
     alias: &str,
-) -> Result<(PathBuf, meta_cli::config::ProjectInfo)> {
+) -> Result<(PathBuf, meta_core::config::ProjectInfo)> {
     // If alias contains '/', use recursive lookup
     if alias.contains('/') {
-        let tree = meta_cli::config::walk_meta_tree(meta_dir, None)?;
+        let tree = meta_core::config::walk_meta_tree(meta_dir, None)?;
 
         // Build a map of full path -> ProjectInfo
-        let project_map = meta_cli::config::build_project_map(&tree, meta_dir, "");
+        let project_map = meta_core::config::build_project_map(&tree, meta_dir, "");
 
         project_map.get(alias).cloned().ok_or_else(|| {
             // Use keys from the map we already built (avoids re-walking the tree)
@@ -684,7 +685,7 @@ mod tests {
         assert!(err.contains("Unknown repo alias"));
     }
 
-    // ── build_project_map (via meta_cli::config) ──────────────
+    // ── build_project_map (via meta_core::config) ──────────────
 
     #[test]
     fn build_project_map_handles_nested_structure() {
@@ -704,8 +705,8 @@ mod tests {
         )
         .unwrap();
 
-        let tree = meta_cli::config::walk_meta_tree(tmp.path(), None).unwrap();
-        let map = meta_cli::config::build_project_map(&tree, tmp.path(), "");
+        let tree = meta_core::config::walk_meta_tree(tmp.path(), None).unwrap();
+        let map = meta_core::config::build_project_map(&tree, tmp.path(), "");
 
         // Should contain both vendor and vendor/lib
         assert!(map.contains_key("vendor"));
