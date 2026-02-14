@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI
-        uses: lewagon/wait-on-check-action@v1.3.4
+        uses: lewagon/wait-on-check-action@v1.5.0
         with:
           ref: ${{ github.sha }}
           check-name: 'Test (ubuntu-latest)'
@@ -19,11 +19,15 @@ jobs:
   notify:
     needs: wait-for-ci
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        downstream:
+          - meta_git_cli
+          - meta_project_cli
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Extract commit info
         id: commit
@@ -32,45 +36,28 @@ jobs:
           echo "message=$MSG" >> $GITHUB_OUTPUT
           echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
           echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          if [[ "$MSG" =~ ^feat ]]; then echo "type=feat" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^fix ]]; then echo "type=fix" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^chore ]]; then echo "type=chore" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^docs ]]; then echo "type=docs" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^test ]]; then echo "type=test" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^refactor ]]; then echo "type=refactor" >> $GITHUB_OUTPUT
+          if [[ "$MSG" =~ ^feat[:(] ]]; then echo "type=feat" >> $GITHUB_OUTPUT
+          elif [[ "$MSG" =~ ^fix[:(] ]]; then echo "type=fix" >> $GITHUB_OUTPUT
+          elif [[ "$MSG" =~ ^chore[:(] ]]; then echo "type=chore" >> $GITHUB_OUTPUT
+          elif [[ "$MSG" =~ ^docs[:(] ]]; then echo "type=docs" >> $GITHUB_OUTPUT
+          elif [[ "$MSG" =~ ^test[:(] ]]; then echo "type=test" >> $GITHUB_OUTPUT
+          elif [[ "$MSG" =~ ^refactor[:(] ]]; then echo "type=refactor" >> $GITHUB_OUTPUT
           else echo "type=other" >> $GITHUB_OUTPUT
           fi
 
-      - name: Notify meta_git_cli
+      - name: Notify ${{ matrix.downstream }}
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.PARENT_REPO_PAT }}
-          repository: harmony-labs/meta_git_cli
+          repository: harmony-labs/${{ matrix.downstream }}
           event-type: dependency-updated
-          client-payload: |
+          client-payload: >-
             {
-              "repo": "${{ github.repository }}",
-              "repo_name": "${{ github.event.repository.name }}",
-              "sha": "${{ steps.commit.outputs.sha }}",
-              "short_sha": "${{ steps.commit.outputs.short_sha }}",
-              "message": "${{ steps.commit.outputs.message }}",
-              "type": "${{ steps.commit.outputs.type }}",
-              "actor": "${{ github.actor }}"
-            }
-
-      - name: Notify meta_project_cli
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.PARENT_REPO_PAT }}
-          repository: harmony-labs/meta_project_cli
-          event-type: dependency-updated
-          client-payload: |
-            {
-              "repo": "${{ github.repository }}",
-              "repo_name": "${{ github.event.repository.name }}",
-              "sha": "${{ steps.commit.outputs.sha }}",
-              "short_sha": "${{ steps.commit.outputs.short_sha }}",
-              "message": "${{ steps.commit.outputs.message }}",
-              "type": "${{ steps.commit.outputs.type }}",
-              "actor": "${{ github.actor }}"
+              "repo": ${{ toJSON(github.repository) }},
+              "repo_name": ${{ toJSON(github.event.repository.name) }},
+              "sha": ${{ toJSON(steps.commit.outputs.sha) }},
+              "short_sha": ${{ toJSON(steps.commit.outputs.short_sha) }},
+              "message": ${{ toJSON(steps.commit.outputs.message) }},
+              "type": ${{ toJSON(steps.commit.outputs.type) }},
+              "actor": ${{ toJSON(github.actor) }}
             }
