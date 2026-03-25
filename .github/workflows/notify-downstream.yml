@@ -54,8 +54,8 @@ jobs:
           write_output sha "$(git rev-parse HEAD)"
           write_output short_sha "$(git rev-parse --short HEAD)"
 
-          re_feat='^feat[:(]'; re_fix='^fix[:(]'; re_chore='^chore[:(]'
-          re_docs='^docs[:(]'; re_test='^test[:(]'; re_refactor='^refactor[:(]'
+          re_feat='^feat[!:(]'; re_fix='^fix[!:(]'; re_chore='^chore[!:(]'
+          re_docs='^docs[!:(]'; re_test='^test[!:(]'; re_refactor='^refactor[!:(]'
           if [[ "$MSG" =~ $re_feat ]]; then write_output type "feat"
           elif [[ "$MSG" =~ $re_fix ]]; then write_output type "fix"
           elif [[ "$MSG" =~ $re_chore ]]; then write_output type "chore"
