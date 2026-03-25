@@ -204,6 +204,7 @@ impl CloneQueue {
         let hosts: BTreeSet<String> = pending
             .iter()
             .filter_map(|t| crate::extract_ssh_host(&t.url))
+            .map(|h| h.to_ascii_lowercase())
             .collect();
         hosts.into_iter().collect()
     }
@@ -581,6 +582,26 @@ mod tests {
         assert!(queue.take_one().is_some());
         assert!(queue.take_one().is_some());
         assert!(queue.take_one().is_none());
+    }
+
+    #[test]
+    fn peek_ssh_hosts_normalizes_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = CloneQueue::new(None, None);
+
+        queue.push(make_task_with_url(
+            "r1",
+            "git@GitHub.com:org/r1.git",
+            &dir.path().join("r1"),
+        ));
+        queue.push(make_task_with_url(
+            "r2",
+            "git@github.com:org/r2.git",
+            &dir.path().join("r2"),
+        ));
+
+        let hosts = queue.peek_ssh_hosts();
+        assert_eq!(hosts, vec!["github.com"]);
     }
 
     #[test]

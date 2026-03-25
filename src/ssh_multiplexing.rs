@@ -216,8 +216,11 @@ pub fn ssh_sockets_dir() -> Option<PathBuf> {
 
 /// Ensure the SSH sockets directory exists with correct permissions.
 ///
-/// Creates `~/.ssh` (mode 700) and `~/.ssh/sockets` (mode 700) if missing.
-/// Returns the path to the sockets directory, or `None` if `HOME` is unset.
+/// Creates `~/.ssh/sockets` if missing.
+///
+/// On Unix, also enforces mode `0o700` on `~/.ssh` and `~/.ssh/sockets`.
+/// Returns the path to the sockets directory, or `None` if the home directory
+/// cannot be determined.
 pub fn ensure_ssh_sockets_dir() -> io::Result<Option<PathBuf>> {
     let Some(sockets_dir) = ssh_sockets_dir() else {
         return Ok(None);
@@ -324,13 +327,35 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// RAII guard that restores HOME on drop, ensuring cleanup even on panic.
+    #[cfg(unix)]
+    struct HomeGuard(Option<String>);
+
+    #[cfg(unix)]
+    impl HomeGuard {
+        fn new() -> Self {
+            Self(std::env::var("HOME").ok())
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match &self.0 {
+                Some(h) => std::env::set_var("HOME", h),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial]
     fn test_ensure_ssh_sockets_dir_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let original_home = std::env::var("HOME").ok();
+        let _guard = HomeGuard::new();
 
         std::env::set_var("HOME", tmp.path());
         let result = ensure_ssh_sockets_dir();
@@ -348,21 +373,16 @@ mod tests {
             fs::metadata(ssh_dir).unwrap().permissions().mode() & 0o777,
             0o700
         );
-
-        // Restore HOME
-        match original_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[cfg(unix)]
     #[test]
+    #[serial_test::serial]
     fn test_ensure_ssh_sockets_dir_fixes_permissive_existing_dir() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::tempdir().unwrap();
-        let original_home = std::env::var("HOME").ok();
+        let _guard = HomeGuard::new();
 
         // Pre-create with overly permissive mode
         let ssh_dir = tmp.path().join(".ssh");
@@ -379,11 +399,6 @@ mod tests {
             fs::metadata(&sockets_dir).unwrap().permissions().mode() & 0o777,
             0o700
         );
-
-        match original_home {
-            Some(h) => std::env::set_var("HOME", h),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     #[test]
