@@ -222,9 +222,7 @@ pub fn ensure_ssh_sockets_dir() -> io::Result<Option<PathBuf>> {
     let Some(sockets_dir) = ssh_sockets_dir() else {
         return Ok(None);
     };
-    if !sockets_dir.exists() {
-        fs::create_dir_all(&sockets_dir)?;
-    }
+    fs::create_dir_all(&sockets_dir)?;
     // Always enforce permissions — a pre-existing directory may have
     // overly permissive modes from a previous `mkdir` or bad umask.
     #[cfg(unix)]
@@ -324,6 +322,68 @@ mod tests {
         // depends on HOME being set and filesystem permissions
         let result = ensure_ssh_sockets_dir();
         assert!(result.is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_ssh_sockets_dir_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+
+        std::env::set_var("HOME", tmp.path());
+        let result = ensure_ssh_sockets_dir();
+        assert!(result.is_ok());
+
+        let sockets_dir = result.unwrap().expect("should return Some path");
+        assert!(sockets_dir.exists());
+        assert_eq!(
+            fs::metadata(&sockets_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let ssh_dir = sockets_dir.parent().unwrap();
+        assert_eq!(
+            fs::metadata(ssh_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        // Restore HOME
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_ensure_ssh_sockets_dir_fixes_permissive_existing_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let original_home = std::env::var("HOME").ok();
+
+        // Pre-create with overly permissive mode
+        let ssh_dir = tmp.path().join(".ssh");
+        let sockets_dir = ssh_dir.join("sockets");
+        fs::create_dir_all(&sockets_dir).unwrap();
+        fs::set_permissions(&sockets_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        std::env::set_var("HOME", tmp.path());
+        let result = ensure_ssh_sockets_dir();
+        assert!(result.is_ok());
+
+        // Permissions should be tightened
+        assert_eq!(
+            fs::metadata(&sockets_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        match original_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

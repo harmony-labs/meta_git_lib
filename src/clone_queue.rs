@@ -548,6 +548,41 @@ mod tests {
         assert_eq!(hosts, vec!["github.com", "gitlab.com"]);
     }
 
+    // ── peek_urls ──────────────────────────────────────────────
+
+    #[test]
+    fn peek_urls_empty_queue() {
+        let queue = CloneQueue::new(None, None);
+        assert!(queue.peek_urls().is_empty());
+    }
+
+    #[test]
+    fn peek_urls_returns_all_pending_urls_without_dequeue() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = CloneQueue::new(None, None);
+
+        queue.push(make_task_with_url(
+            "r1",
+            "git@github.com:org/r1.git",
+            &dir.path().join("r1"),
+        ));
+        queue.push(make_task_with_url(
+            "r2",
+            "https://github.com/org/r2.git",
+            &dir.path().join("r2"),
+        ));
+
+        let urls = queue.peek_urls();
+        assert_eq!(urls.len(), 2);
+        assert!(urls.contains(&"git@github.com:org/r1.git".to_string()));
+        assert!(urls.contains(&"https://github.com/org/r2.git".to_string()));
+
+        // Verify tasks are still in the queue (not dequeued)
+        assert!(queue.take_one().is_some());
+        assert!(queue.take_one().is_some());
+        assert!(queue.take_one().is_none());
+    }
+
     #[test]
     fn peek_ssh_hosts_filters_https_urls() {
         let dir = tempfile::tempdir().unwrap();
