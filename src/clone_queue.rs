@@ -198,6 +198,16 @@ impl CloneQueue {
         Ok(added)
     }
 
+    /// Extract unique SSH hostnames from all pending tasks.
+    pub fn peek_ssh_hosts(&self) -> Vec<String> {
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        let hosts: std::collections::BTreeSet<String> = pending
+            .iter()
+            .filter_map(|t| crate::extract_ssh_host(&t.url))
+            .collect();
+        hosts.into_iter().collect()
+    }
+
     /// Mark a task as failed
     pub fn mark_failed(&self, task: &CloneTask) {
         self.total_completed.fetch_add(1, Ordering::SeqCst);

@@ -1,36 +1,12 @@
-//! SSH multiplexing configuration helper for optimizing parallel git operations.
+//! SSH helpers for parallel git operations.
 //!
 //! When running multiple git commands in parallel (e.g., `meta git update`),
 //! SSH connections to the same host can be rate-limited. SSH multiplexing
 //! allows multiple sessions to share a single TCP connection, avoiding this issue.
 
-use console::style;
-use serde::Deserialize;
 use std::fs;
-use std::io::{self, BufRead, Write};
+use std::io;
 use std::path::PathBuf;
-
-/// Default ControlPersist duration in seconds (10 minutes)
-pub const DEFAULT_CONTROL_PERSIST: u32 = 600;
-
-/// SSH multiplexing configuration options.
-///
-/// Can be loaded from `.meta.yaml` under the `ssh:` key:
-/// ```yaml
-/// ssh:
-///   control_persist: 300  # 5 minutes
-/// ```
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct SshConfig {
-    /// Duration in seconds to keep SSH connections open after last use.
-    /// Default: 600 (10 minutes)
-    #[serde(default = "default_control_persist")]
-    pub control_persist: u32,
-}
-
-fn default_control_persist() -> u32 {
-    DEFAULT_CONTROL_PERSIST
-}
 
 /// Patterns that indicate SSH rate-limiting or connection issues
 const SSH_ERROR_PATTERNS: &[&str] = &[
@@ -46,32 +22,6 @@ pub fn is_ssh_rate_limit_error(error_output: &str) -> bool {
     SSH_ERROR_PATTERNS
         .iter()
         .any(|pattern| error_output.contains(pattern))
-}
-
-/// Read a line from the TTY directly, bypassing stdin.
-///
-/// This is necessary when running as a subprocess where stdin is
-/// connected to a pipe (e.g., JSON-RPC communication) rather than
-/// the user's terminal.
-///
-/// Uses `/dev/tty` on Unix and `CONIN$` on Windows.
-pub fn read_line_from_tty() -> io::Result<String> {
-    #[cfg(unix)]
-    {
-        let tty = fs::File::open("/dev/tty")?;
-        let mut reader = io::BufReader::new(tty);
-        let mut input = String::new();
-        reader.read_line(&mut input)?;
-        Ok(input)
-    }
-    #[cfg(windows)]
-    {
-        let tty = fs::File::open("CONIN$")?;
-        let mut reader = io::BufReader::new(tty);
-        let mut input = String::new();
-        reader.read_line(&mut input)?;
-        Ok(input)
-    }
 }
 
 /// Validate that a hostname contains only valid characters.
@@ -259,245 +209,31 @@ pub fn urls_match(a: &str, b: &str) -> bool {
     normalize_git_url(a) == normalize_git_url(b)
 }
 
-/// Get the path to the SSH config file
-fn ssh_config_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".ssh").join("config"))
-}
-
 /// Get the path to the SSH sockets directory
-fn ssh_sockets_dir() -> Option<PathBuf> {
+pub fn ssh_sockets_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".ssh").join("sockets"))
 }
 
-/// Check if SSH multiplexing is configured for all given hosts.
+/// Ensure the SSH sockets directory exists with correct permissions.
 ///
-/// A host is considered configured if the SSH config contains a `Host <host>` block
-/// with `ControlMaster`, or if a `Host *` wildcard block has `ControlMaster`.
-pub fn is_multiplexing_configured(hosts: &[&str]) -> bool {
-    let Some(config_path) = ssh_config_path() else {
-        return false;
-    };
-
-    let Ok(content) = fs::read_to_string(&config_path) else {
-        return false;
-    };
-
-    hosts.iter().all(|host| is_host_configured(&content, host))
-}
-
-/// Check if a specific host has SSH multiplexing configured.
-///
-/// Parses SSH config line-by-line, tracking Host blocks. A host is configured if:
-/// - It has a dedicated `Host <host>` block containing `ControlMaster`, or
-/// - A `Host *` wildcard block contains `ControlMaster`
-fn is_host_configured(content: &str, host: &str) -> bool {
-    let mut in_matching_block = false;
-    let mut wildcard_has_control_master = false;
-    let mut in_wildcard_block = false;
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // New Host/Match block starts — reset tracking
-        if trimmed.starts_with("Host ") || trimmed.starts_with("Match ") {
-            in_matching_block = false;
-            in_wildcard_block = false;
-
-            if let Some(hosts_on_line) = trimmed.strip_prefix("Host ") {
-                // Host lines can have multiple patterns: "Host github.com gitlab.com"
-                for pattern in hosts_on_line.split_whitespace() {
-                    if pattern == host {
-                        in_matching_block = true;
-                    }
-                    if pattern == "*" {
-                        in_wildcard_block = true;
-                    }
-                }
-            }
-            continue;
-        }
-
-        // Check for ControlMaster within a matching block
-        if trimmed.starts_with("ControlMaster") {
-            if in_matching_block {
-                return true;
-            }
-            if in_wildcard_block {
-                wildcard_has_control_master = true;
-            }
-        }
-    }
-
-    wildcard_has_control_master
-}
-
-/// The configuration block to add for SSH multiplexing for a given host.
-///
-/// Uses the provided ControlPersist duration (in seconds), or the default (600s)
-/// if not specified.
-fn multiplexing_config_block(host: &str, control_persist: Option<u32>) -> String {
-    let persist = control_persist.unwrap_or(DEFAULT_CONTROL_PERSIST);
-    format!(
-        "\n# SSH multiplexing for faster parallel git operations\n\
-         Host {host}\n    \
-         ControlMaster auto\n    \
-         ControlPath ~/.ssh/sockets/%r@%h-%p\n    \
-         ControlPersist {persist}\n"
-    )
-}
-
-/// Prompt user and set up SSH multiplexing for the given hosts.
-/// Returns Ok(true) if setup was completed, Ok(false) if user declined.
-///
-/// If `config` is provided, uses its `control_persist` value. Otherwise uses default (600s).
-pub fn prompt_and_setup_multiplexing(
-    hosts: &[&str],
-    config: Option<&SshConfig>,
-) -> io::Result<bool> {
-    // Filter to only unconfigured hosts
-    let config_content = ssh_config_path()
-        .and_then(|p| fs::read_to_string(p).ok())
-        .unwrap_or_default();
-    let unconfigured: Vec<&str> = hosts
-        .iter()
-        .filter(|h| !is_host_configured(&config_content, h))
-        .copied()
-        .collect();
-
-    if unconfigured.is_empty() {
-        return Ok(true);
-    }
-
-    let control_persist = config.map(|c| c.control_persist);
-
-    println!();
-    println!("{}", style("SSH Multiplexing Setup").bold().cyan());
-    println!();
-    println!("Multiple SSH connections can be rate-limited when running parallel git operations.");
-    println!("SSH multiplexing allows parallel operations to share a single connection per host.");
-    println!();
-
-    let host_display = if unconfigured.len() == 1 {
-        unconfigured[0].to_string()
-    } else {
-        unconfigured.join(", ")
-    };
-    println!("Hosts to configure: {}", style(&host_display).yellow());
-    println!();
-    println!(
-        "This will add the following to {}:",
-        style("~/.ssh/config").yellow()
-    );
-    for host in &unconfigured {
-        print!(
-            "{}",
-            style(multiplexing_config_block(host, control_persist)).dim()
-        );
-    }
-
-    print!("Would you like to set this up now? [y/N]: ");
-    io::stdout().flush()?;
-
-    let input = read_line_from_tty()?;
-
-    if input.trim().to_lowercase() != "y" {
-        println!("Setup cancelled. You can set this up manually later.");
-        return Ok(false);
-    }
-
-    setup_multiplexing(&unconfigured, config)?;
-    Ok(true)
-}
-
-/// Set up SSH multiplexing for the given hosts (creates sockets dir and updates config).
-///
-/// If `config` is provided, uses its `control_persist` value. Otherwise uses default (600s).
-pub fn setup_multiplexing(hosts: &[&str], config: Option<&SshConfig>) -> io::Result<()> {
-    // Create sockets directory
+/// Creates `~/.ssh` (mode 700) and `~/.ssh/sockets` (mode 700) if missing.
+/// Returns the path to the sockets directory, or `None` if `HOME` is unset.
+pub fn ensure_ssh_sockets_dir() -> io::Result<Option<PathBuf>> {
     let Some(sockets_dir) = ssh_sockets_dir() else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Could not determine home directory",
-        ));
+        return Ok(None);
     };
-
     if !sockets_dir.exists() {
         fs::create_dir_all(&sockets_dir)?;
-        println!("{} Created {}", style("✓").green(), sockets_dir.display());
-    }
-
-    // Update SSH config
-    let Some(config_path) = ssh_config_path() else {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "Could not determine home directory",
-        ));
-    };
-
-    // Ensure .ssh directory exists
-    if let Some(ssh_dir) = config_path.parent() {
-        if !ssh_dir.exists() {
-            fs::create_dir_all(ssh_dir)?;
-        }
-    }
-
-    // Read existing config or start fresh
-    let existing_config = fs::read_to_string(&config_path).unwrap_or_default();
-    let control_persist = config.map(|c| c.control_persist);
-
-    let mut blocks_to_add = Vec::new();
-    for host in hosts {
-        // Check if Host block already exists for this host
-        let host_pattern = format!("Host {host}");
-        if existing_config
-            .lines()
-            .any(|line| line.trim() == host_pattern)
+        #[cfg(unix)]
         {
-            println!(
-                "{} Found existing '{}' in SSH config.",
-                style("!").yellow(),
-                host_pattern,
-            );
-            println!("  Please manually verify ControlMaster settings for this host.");
-        } else {
-            blocks_to_add.push(multiplexing_config_block(host, control_persist));
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&sockets_dir, fs::Permissions::from_mode(0o700))?;
+            if let Some(ssh_dir) = sockets_dir.parent() {
+                fs::set_permissions(ssh_dir, fs::Permissions::from_mode(0o700))?;
+            }
         }
     }
-
-    if blocks_to_add.is_empty() {
-        return Ok(());
-    }
-
-    // Append config blocks
-    let new_config = if existing_config.is_empty() {
-        blocks_to_add.join("")
-    } else {
-        format!("{}\n{}", existing_config.trim_end(), blocks_to_add.join(""))
-    };
-
-    fs::write(&config_path, new_config)?;
-    println!("{} Updated {}", style("✓").green(), config_path.display());
-
-    println!();
-    println!(
-        "{} SSH multiplexing is now configured!",
-        style("✓").green().bold()
-    );
-    println!("  Parallel git operations will now share a single SSH connection per host.");
-
-    Ok(())
-}
-
-/// Print a hint about SSH multiplexing (for use after detecting rate-limit errors)
-pub fn print_multiplexing_hint() {
-    println!();
-    println!("{}", style("Hint:").yellow().bold());
-    println!("  Some SSH connections failed, possibly due to rate limiting.");
-    println!(
-        "  Run {} to set up SSH multiplexing,",
-        style("meta git setup-ssh").cyan()
-    );
-    println!("  which allows parallel operations to share a single connection per host.");
+    Ok(Some(sockets_dir))
 }
 
 #[cfg(test)]
@@ -570,79 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_host_configured_specific_host() {
-        let config = "\
-Host github.com
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-    ControlPersist 600
-";
-        assert!(is_host_configured(config, "github.com"));
-        assert!(!is_host_configured(config, "gitlab.com"));
-    }
-
-    #[test]
-    fn test_is_host_configured_wildcard() {
-        let config = "\
-Host *
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-    ControlPersist 600
-";
-        assert!(is_host_configured(config, "github.com"));
-        assert!(is_host_configured(config, "gitlab.com"));
-        assert!(is_host_configured(config, "anything.example.com"));
-    }
-
-    #[test]
-    fn test_is_host_configured_multiple_blocks() {
-        let config = "\
-Host github.com
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-
-Host gitlab.com
-    IdentityFile ~/.ssh/gitlab_key
-";
-        assert!(is_host_configured(config, "github.com"));
-        // gitlab.com has a block but no ControlMaster
-        assert!(!is_host_configured(config, "gitlab.com"));
-    }
-
-    #[test]
-    fn test_is_host_configured_multi_pattern_line() {
-        let config = "\
-Host github.com gitlab.com
-    ControlMaster auto
-    ControlPath ~/.ssh/sockets/%r@%h-%p
-";
-        assert!(is_host_configured(config, "github.com"));
-        assert!(is_host_configured(config, "gitlab.com"));
-        assert!(!is_host_configured(config, "bitbucket.org"));
-    }
-
-    #[test]
-    fn test_is_host_configured_empty() {
-        assert!(!is_host_configured("", "github.com"));
-    }
-
-    #[test]
-    fn test_ssh_config_path() {
-        // ssh_config_path should return Some path when HOME is set
-        let path = ssh_config_path();
-        // This test just verifies the function doesn't panic
-        // The actual path depends on the HOME environment variable
-        if std::env::var("HOME").is_ok() {
-            assert!(path.is_some());
-            let path = path.unwrap();
-            assert!(path.ends_with("config"));
-            assert!(path.to_str().unwrap().contains(".ssh"));
-        }
-    }
-
-    #[test]
     fn test_ssh_sockets_dir() {
-        // ssh_sockets_dir should return Some path when HOME is set
         let path = ssh_sockets_dir();
         if std::env::var("HOME").is_ok() {
             assert!(path.is_some());
@@ -653,27 +317,11 @@ Host github.com gitlab.com
     }
 
     #[test]
-    fn test_multiplexing_config_block_default() {
-        let block = multiplexing_config_block("github.com", None);
-        assert!(block.contains("Host github.com"));
-        assert!(block.contains("ControlMaster auto"));
-        assert!(block.contains("ControlPath"));
-        assert!(block.contains("ControlPersist 600"));
-    }
-
-    #[test]
-    fn test_multiplexing_config_block_custom_persist() {
-        let block = multiplexing_config_block("github.com", Some(300));
-        assert!(block.contains("Host github.com"));
-        assert!(block.contains("ControlPersist 300"));
-    }
-
-    #[test]
-    fn test_multiplexing_config_block_custom_host() {
-        let block = multiplexing_config_block("gitlab.example.com", None);
-        assert!(block.contains("Host gitlab.example.com"));
-        assert!(block.contains("ControlMaster auto"));
-        assert!(!block.contains("github.com"));
+    fn test_ensure_ssh_sockets_dir() {
+        // Just verify the function doesn't panic — actual dir creation
+        // depends on HOME being set and filesystem permissions
+        let result = ensure_ssh_sockets_dir();
+        assert!(result.is_ok());
     }
 
     #[test]
