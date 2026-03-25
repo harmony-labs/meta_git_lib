@@ -1,6 +1,6 @@
 use log::{debug, warn};
 use meta_core::config;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -201,11 +201,18 @@ impl CloneQueue {
     /// Extract unique SSH hostnames from all pending tasks.
     pub fn peek_ssh_hosts(&self) -> Vec<String> {
         let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        let hosts: std::collections::BTreeSet<String> = pending
+        let hosts: BTreeSet<String> = pending
             .iter()
             .filter_map(|t| crate::extract_ssh_host(&t.url))
             .collect();
         hosts.into_iter().collect()
+    }
+
+    /// Get all URLs from pending tasks (for SSH target discovery).
+    /// Does not remove tasks from the queue.
+    pub fn peek_urls(&self) -> Vec<String> {
+        let pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.iter().map(|t| t.url.clone()).collect()
     }
 
     /// Mark a task as failed
@@ -496,5 +503,68 @@ mod tests {
         let tasks = queue.drain_all();
         assert_eq!(tasks.len(), 2);
         assert!(queue.take_one().is_none());
+    }
+
+    // ── peek_ssh_hosts ──────────────────────────────────────────
+
+    fn make_task_with_url(name: &str, url: &str, path: &Path) -> CloneTask {
+        CloneTask {
+            name: name.to_string(),
+            url: url.to_string(),
+            target_path: path.to_path_buf(),
+            depth_level: 0,
+            is_meta: false,
+        }
+    }
+
+    #[test]
+    fn peek_ssh_hosts_empty_queue() {
+        let queue = CloneQueue::new(None, None);
+        assert!(queue.peek_ssh_hosts().is_empty());
+    }
+
+    #[test]
+    fn peek_ssh_hosts_deduplicates_and_sorts() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = CloneQueue::new(None, None);
+
+        queue.push(make_task_with_url(
+            "r1",
+            "git@github.com:org/r1.git",
+            &dir.path().join("r1"),
+        ));
+        queue.push(make_task_with_url(
+            "r2",
+            "git@github.com:org/r2.git",
+            &dir.path().join("r2"),
+        ));
+        queue.push(make_task_with_url(
+            "r3",
+            "git@gitlab.com:org/r3.git",
+            &dir.path().join("r3"),
+        ));
+
+        let hosts = queue.peek_ssh_hosts();
+        assert_eq!(hosts, vec!["github.com", "gitlab.com"]);
+    }
+
+    #[test]
+    fn peek_ssh_hosts_filters_https_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let queue = CloneQueue::new(None, None);
+
+        queue.push(make_task_with_url(
+            "ssh",
+            "git@github.com:org/ssh.git",
+            &dir.path().join("ssh"),
+        ));
+        queue.push(make_task_with_url(
+            "https",
+            "https://github.com/org/https.git",
+            &dir.path().join("https"),
+        ));
+
+        let hosts = queue.peek_ssh_hosts();
+        assert_eq!(hosts, vec!["github.com"]); // only SSH host
     }
 }

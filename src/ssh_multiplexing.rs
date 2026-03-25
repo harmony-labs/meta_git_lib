@@ -224,13 +224,15 @@ pub fn ensure_ssh_sockets_dir() -> io::Result<Option<PathBuf>> {
     };
     if !sockets_dir.exists() {
         fs::create_dir_all(&sockets_dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&sockets_dir, fs::Permissions::from_mode(0o700))?;
-            if let Some(ssh_dir) = sockets_dir.parent() {
-                fs::set_permissions(ssh_dir, fs::Permissions::from_mode(0o700))?;
-            }
+    }
+    // Always enforce permissions — a pre-existing directory may have
+    // overly permissive modes from a previous `mkdir` or bad umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&sockets_dir, fs::Permissions::from_mode(0o700))?;
+        if let Some(ssh_dir) = sockets_dir.parent() {
+            fs::set_permissions(ssh_dir, fs::Permissions::from_mode(0o700))?;
         }
     }
     Ok(Some(sockets_dir))
