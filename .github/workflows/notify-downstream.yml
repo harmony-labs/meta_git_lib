@@ -3,9 +3,13 @@ name: Notify Downstream
 on:
   push:
     branches: [main]
+  repository_dispatch:
+    types: [dependency-updated]
 
 jobs:
   wait-for-ci:
+    # Only wait when triggered by our own push (not a forwarded dispatch)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI
@@ -17,6 +21,7 @@ jobs:
           wait-interval: 10
 
   notify:
+    if: always() && (needs.wait-for-ci.result == 'success' || needs.wait-for-ci.result == 'skipped')
     needs: wait-for-ci
     runs-on: ubuntu-latest
     strategy:
@@ -26,27 +31,8 @@ jobs:
           - meta_git_cli
           - meta_project_cli
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Extract commit info
-        id: commit
-        run: |
-          MSG=$(git log -1 --pretty=%s)
-          echo "message=$MSG" >> $GITHUB_OUTPUT
-          echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-          echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-          if [[ "$MSG" =~ ^feat[:(] ]]; then echo "type=feat" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^fix[:(] ]]; then echo "type=fix" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^chore[:(] ]]; then echo "type=chore" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^docs[:(] ]]; then echo "type=docs" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^test[:(] ]]; then echo "type=test" >> $GITHUB_OUTPUT
-          elif [[ "$MSG" =~ ^refactor[:(] ]]; then echo "type=refactor" >> $GITHUB_OUTPUT
-          else echo "type=other" >> $GITHUB_OUTPUT
-          fi
-
       - name: Notify ${{ matrix.downstream }}
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.PARENT_REPO_PAT }}
           repository: harmony-labs/${{ matrix.downstream }}
@@ -54,10 +40,6 @@ jobs:
           client-payload: >-
             {
               "repo": ${{ toJSON(github.repository) }},
-              "repo_name": ${{ toJSON(github.event.repository.name) }},
-              "sha": ${{ toJSON(steps.commit.outputs.sha) }},
-              "short_sha": ${{ toJSON(steps.commit.outputs.short_sha) }},
-              "message": ${{ toJSON(steps.commit.outputs.message) }},
-              "type": ${{ toJSON(steps.commit.outputs.type) }},
+              "sha": ${{ toJSON(github.sha) }},
               "actor": ${{ toJSON(github.actor) }}
             }
