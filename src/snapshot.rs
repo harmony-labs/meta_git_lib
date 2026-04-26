@@ -263,7 +263,7 @@ pub fn list_snapshots(meta_root: &Path) -> Result<Vec<SnapshotInfo>> {
     }
 
     // Sort by creation time, newest first
-    snapshots.sort_by(|a, b| b.created.cmp(&a.created));
+    snapshots.sort_by_key(|s| std::cmp::Reverse(s.created));
 
     Ok(snapshots)
 }
